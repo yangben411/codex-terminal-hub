@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+public/terminal.js
+public/terminal.css
+*.log
+.DS_Store
+coverage/
+.local/
+dist/
+*.tgz

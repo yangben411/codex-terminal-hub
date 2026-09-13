@@ -1,0 +1,35 @@
+{
+  "name": "codex-terminal-hub",
+  "version": "0.3.0",
+  "description": "A private, mobile-friendly tmux web terminal with Tailscale Serve, history browsing and clipboard sync.",
+  "license": "MIT",
+  "engines": { "node": ">=22.9.0" },
+  "repository": { "type": "git", "url": "https://github.com/yangben411/codex-terminal-hub.git" },
+  "homepage": "https://github.com/yangben411/codex-terminal-hub#readme",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "node scripts/fix-node-pty-permissions.mjs",
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "build": "esbuild src/app.js --bundle --format=esm --platform=browser --target=es2022 --outfile=public/terminal.js --minify",
+    "check": "npm run build && node --check server.mjs && node --check terminal-broker.mjs && node --check public/terminal.js",
+    "test": "node --test test/*.test.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "doctor": "node --env-file-if-exists=.env scripts/doctor.mjs",
+    "service:install": "node --env-file-if-exists=.env scripts/install-launch-agent.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/headless": "^6.0.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "pinyin-pro": "3.29.3",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

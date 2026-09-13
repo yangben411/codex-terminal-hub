@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0d11" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Codex Hub" />
+    <title>Codex Terminal Hub</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/terminal-icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css?v=0.3.0" />
+    <link rel="stylesheet" href="/terminal.css?v=0.3.0" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-row">
+          <button class="icon-button mobile-only" id="closeSidebar" aria-label="关闭会话列表">×</button>
+          <a class="brand" href="#" data-action="overview" aria-label="返回总览">
+            <span class="brand-mark">&gt;_</span>
+            <span>
+              <strong>Codex Hub</strong>
+              <small>Mac Studio</small>
+            </span>
+          </a>
+          <span class="connection-dot" id="connectionDot" title="服务连接状态"></span>
+        </div>
+
+        <div class="sidebar-tools">
+          <label class="search-box">
+            <span>⌕</span>
+            <input id="sessionSearch" type="search" placeholder="搜索会话" autocomplete="off" />
+          </label>
+          <button class="primary-button" id="newSessionButton">＋ 新建 Session</button>
+        </div>
+
+        <div class="session-list-shell">
+          <nav class="session-list" id="sessionList" aria-label="tmux sessions"></nav>
+          <div
+            class="session-scrollbar"
+            id="sessionScrollbar"
+            role="scrollbar"
+            aria-controls="sessionList"
+            aria-label="Session 列表滚动条"
+            aria-orientation="vertical"
+            aria-valuemin="0"
+            aria-valuemax="0"
+            aria-valuenow="0"
+            tabindex="0"
+            hidden
+          >
+            <div class="session-scrollbar-thumb" id="sessionScrollbarThumb"></div>
+          </div>
+        </div>
+
+        <div class="sidebar-footer">
+          <button class="quiet-button" id="refreshButton">↻ 刷新状态</button>
+          <span id="refreshTime">尚未刷新</span>
+        </div>
+      </aside>
+
+      <div class="scrim" id="scrim"></div>
+
+      <main class="main-area">
+        <header class="topbar">
+          <button class="icon-button mobile-only" id="openSidebar" aria-label="打开会话列表">☰</button>
+          <div class="view-title">
+            <strong id="viewTitle">Sessions</strong>
+            <span id="viewSubtitle">全部 tmux 工作区</span>
+          </div>
+          <div class="topbar-actions">
+            <button class="icon-button" id="openCopyText" type="button" title="打开纯文本，选择并复制" hidden>复制</button>
+            <button class="quiet-button" id="overviewButton">总览</button>
+            <button class="quiet-button" id="multiViewButton">多窗</button>
+            <button class="quiet-button" id="newWindowButton" disabled>＋ Window</button>
+            <button class="icon-button" id="openTerminalTab" disabled title="在新标签页打开">↗</button>
+          </div>
+        </header>
+
+        <section class="overview-view" id="overviewView">
+          <div class="overview-hero">
+            <div>
+              <p class="eyebrow">TERMINAL WORKSPACES</p>
+              <h1>你的 Codex 控制台</h1>
+              <p>每个项目独立运行，断开网页也不会中止。选择会话进入，或勾选最多四个会话同时查看。</p>
+            </div>
+            <div class="summary-card">
+              <span id="sessionCount">0</span>
+              <small>tmux sessions</small>
+            </div>
+          </div>
+          <div class="overview-actions">
+            <button class="primary-button" id="openSelectedMulti" disabled>以多窗打开所选</button>
+            <span id="multiSelectionHint">未选择会话</span>
+          </div>
+          <div class="session-grid" id="sessionGrid"></div>
+        </section>
+
+        <section class="terminal-view" id="terminalView" hidden>
+          <div class="window-strip" id="windowStrip"></div>
+          <div class="terminal-grid" id="terminalGrid"></div>
+        </section>
+
+        <button class="composer-toggle" id="composerToggle" type="button" aria-expanded="false" hidden>
+          ⌨ 输入
+        </button>
+
+        <section class="empty-view" id="emptyView" hidden>
+          <div class="empty-icon">&gt;_</div>
+          <h2>还没有 tmux session</h2>
+          <p>新建一个 session，选择工作目录和启动方式即可。</p>
+          <button class="primary-button" data-action="new-session">新建第一个 Session</button>
+        </section>
+
+      </main>
+    </div>
+
+    <section class="composer" id="composer" hidden>
+      <header class="composer-heading">
+        <strong>终端输入</strong>
+        <button type="button" id="composerClose" aria-label="收起输入面板">收起</button>
+      </header>
+      <div class="quick-keys" id="quickKeys">
+        <button data-key="tab">Tab</button>
+        <button data-key="ctrl-c">Ctrl-C</button>
+        <button data-key="ctrl-l">Ctrl-L</button>
+      </div>
+      <div class="mobile-control-deck">
+        <div class="mobile-dpad" id="mobileDpad" role="group" aria-label="移动端方向键">
+          <button class="dpad-up" data-key="up" aria-label="向上">↑</button>
+          <button class="dpad-left" data-key="left" aria-label="向左">←</button>
+          <button class="dpad-enter" data-key="enter" aria-label="确认">
+            <span>↵</span>
+            <small>Enter</small>
+          </button>
+          <button class="dpad-right" data-key="right" aria-label="向右">→</button>
+          <button class="dpad-down" data-key="down" aria-label="向下">↓</button>
+        </div>
+        <div class="composer-row">
+          <button class="mobile-direction-toggle" id="mobileDirectionToggle" type="button" aria-expanded="false">方向</button>
+          <label class="target-picker">
+            <span>发送到</span>
+            <select id="targetSession"></select>
+          </label>
+          <textarea id="terminalInput" rows="1" placeholder="输入会自动保存；↑↓ 切换最近 3 条输入"></textarea>
+          <button class="send-button" id="sendInputButton" type="button" aria-label="发送并回车">发送 ↵</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="client-takeover" id="clientTakeover" role="alertdialog" aria-modal="true" hidden>
+      <div class="client-takeover-card">
+        <div class="client-takeover-icon">&gt;_</div>
+        <p class="eyebrow" id="clientTakeoverEyebrow">MANUAL RECONNECT</p>
+        <h2 id="clientTakeoverTitle">另一页面已连接</h2>
+        <div class="client-presence-status">
+          <span class="client-presence-dot live" id="clientPresenceDot"></span>
+          <strong id="clientPresenceLabel">正在检查连接状态</strong>
+        </div>
+        <p id="clientTakeoverMessage">正在判断当前终端页面是否仍在展示和使用。</p>
+        <button class="primary-button" id="reclaimClient">重新连接并接管</button>
+      </div>
+    </section>
+
+    <dialog id="newSessionDialog">
+      <form method="dialog" id="newSessionForm" autocomplete="off">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">NEW WORKSPACE</p>
+            <h2>新建 tmux Session</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog="newSessionDialog" aria-label="关闭">×</button>
+        </div>
+        <label>
+          <span>Session 名称</span>
+          <input name="name" required maxlength="64" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="例如：服务器维护、公众号写作" />
+          <small>支持中文。中文保留为显示名，后台自动转为拼音标识；重名时自动加数字。</small>
+        </label>
+        <div class="directory-picker">
+          <label for="newSessionCwd">
+            <span>工作目录</span>
+            <input id="newSessionCwd" name="cwd" required placeholder="/Users/…/项目目录" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="directoryOptions" />
+          </label>
+          <div id="directorySuggestions" hidden>
+            <p class="dialog-context" id="directoryStatus" role="status"></p>
+            <div id="directoryOptions" class="directory-options" role="listbox" aria-label="匹配的文件夹"></div>
+          </div>
+          <small class="dialog-context">输入文件夹名称开头可筛选，点选后继续浏览子目录。</small>
+        </div>
+        <label>
+          <span>第一个 Window 名称</span>
+          <input name="windowName" required maxlength="48" value="codex" />
+        </label>
+        <label>
+          <span>启动方式</span>
+          <select name="startup">
+            <option value="codex">启动新的 Codex</option>
+            <option value="resume">选择并恢复 Codex 对话</option>
+            <option value="shell">只打开 Shell</option>
+          </select>
+        </label>
+        <div class="dialog-actions">
+          <button class="quiet-button" type="button" data-close-dialog="newSessionDialog">取消</button>
+          <button class="primary-button" value="default" id="createSessionSubmit">创建并打开</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="newWindowDialog">
+      <form method="dialog" id="newWindowForm">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">NEW CONVERSATION</p>
+            <h2>新建 Window</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog="newWindowDialog" aria-label="关闭">×</button>
+        </div>
+        <p class="dialog-context" id="newWindowContext"></p>
+        <label>
+          <span>Window 名称</span>
+          <input name="name" required maxlength="48" value="codex" />
+        </label>
+        <label>
+          <span>工作目录</span>
+          <input name="cwd" required />
+        </label>
+        <label>
+          <span>启动方式</span>
+          <select name="startup">
+            <option value="codex">启动新的 Codex</option>
+            <option value="resume">选择并恢复 Codex 对话</option>
+            <option value="shell">只打开 Shell</option>
+          </select>
+        </label>
+        <div class="dialog-actions">
+          <button class="quiet-button" type="button" data-close-dialog="newWindowDialog">取消</button>
+          <button class="primary-button" value="default" id="createWindowSubmit">创建 Window</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="sessionLabelDialog" aria-labelledby="sessionLabelTitle">
+      <form method="dialog" id="sessionLabelForm">
+        <div class="dialog-heading">
+          <h2 id="sessionLabelTitle">修改显示名称</h2>
+          <button class="icon-button" value="cancel" formnovalidate aria-label="关闭">×</button>
+        </div>
+        <p class="dialog-context" id="sessionLabelOriginal"></p>
+        <label>
+          <span>备注名</span>
+          <input id="sessionLabelInput" maxlength="64" placeholder="例如：公众号写作、服务器维护" autocomplete="off" />
+          <small>只修改网页标签，支持中文。清空后恢复原名；手机和电脑共用此备注。</small>
+        </label>
+        <div class="dialog-actions">
+          <button class="quiet-button" value="cancel" formnovalidate>取消</button>
+          <button class="primary-button" value="save" id="sessionLabelSave">保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="copyTextDialog" aria-labelledby="copyTextTitle">
+      <form method="dialog">
+        <div class="dialog-heading">
+          <h2 id="copyTextTitle">纯文本复制</h2>
+          <button class="icon-button" value="close" aria-label="关闭纯文本面板" autofocus>×</button>
+        </div>
+        <p class="dialog-context" id="copyTextContext"></p>
+        <label>
+          <span>复制范围</span>
+          <select id="copyTextScope">
+            <option value="screen">当前看到的一屏</option>
+            <option value="loaded">当前终端已加载的内容</option>
+          </select>
+        </label>
+        <textarea id="copyTextContent" readonly aria-label="可选择复制的终端纯文本" spellcheck="false"></textarea>
+        <p class="dialog-context" id="copyTextFeedback" role="status" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button class="quiet-button" id="selectCopyText" type="button">全选文字</button>
+          <button class="primary-button" id="copyTextAll" type="button">复制全部</button>
+        </div>
+      </form>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/terminal.js?v=0.3.0" type="module"></script>
+  </body>
+</html>

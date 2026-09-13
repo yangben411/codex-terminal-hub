@@ -1,0 +1,14 @@
+# Copy to ~/.config/systemd/user/codex-terminal-hub.service and edit absolute paths.
+[Unit]
+Description=Codex Terminal Hub (private web terminal)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/absolute/path/to/codex-terminal-hub
+ExecStart=/absolute/path/to/node --env-file-if-exists=/absolute/path/to/codex-terminal-hub/.env /absolute/path/to/codex-terminal-hub/server.mjs
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
