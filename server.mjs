@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import http from "node:http";
@@ -39,7 +40,9 @@ const renderLowWaterBytes = Math.min(
   renderHighWaterBytes,
   boundedEnvNumber("CODEX_TERMINAL_RENDER_LOW_WATER_BYTES", 64 * 1024, 8 * 1024, renderHighWaterBytes),
 );
-const fieldSeparator = "\u001f";
+// A printable per-process delimiter survives tmux's formatting/escaping rules
+// without decoding terminal control characters or colliding with normal paths.
+const fieldSeparator = `__hub_${randomUUID()}__`;
 const terminalBrokers = new Map();
 const terminalSockets = new Set();
 const historySnapshots = new Map();

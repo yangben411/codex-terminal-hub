@@ -10,8 +10,12 @@ const plistPath = path.join(os.homedir(), "Library", "LaunchAgents", `${label}.p
 const logs = path.join(os.homedir(), "Library", "Logs", "CodexTerminalHub");
 const xml = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 const env = {
-  PATH: [...new Set([path.dirname(process.execPath), ...(process.env.PATH || "").split(":").filter(Boolean), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])].join(":"),
-  LANG: process.env.LANG || "en_US.UTF-8",
+  // Do not persist npm's injected paths or an agent's temporary PATH entries.
+  PATH: process.env.CODEX_TERMINAL_SERVICE_PATH || [...new Set([
+    path.dirname(process.execPath), path.join(os.homedir(), ".local", "bin"),
+    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+  ])].join(":"),
+  LANG: "en_US.UTF-8",
 };
 const args = [process.execPath, `--env-file-if-exists=${path.join(root, ".env")}`, path.join(root, "server.mjs")];
 const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -42,5 +46,5 @@ if (process.argv.includes("--print")) {
   }
   await writeFile(plistPath, plist, { flag: process.argv.includes("--force") ? "w" : "wx", mode: 0o600 });
   const target = `gui/${process.getuid()}`;
-  console.log(`Installed ${plistPath}\nThis command does not restart a running service. To start:\nlaunchctl bootstrap ${target} ${shellQuote(plistPath)}\nFor an already loaded service, boot it out first:\nlaunchctl bootout ${target}/${label}`);
+  console.log(`Installed ${plistPath}\nThis command does not restart a running service. To start:\nlaunchctl bootstrap ${target} ${shellQuote(plistPath)}\nlaunchctl kickstart ${target}/${label}\nFor an already loaded service, boot it out first and wait for it to stop:\nlaunchctl bootout ${target}/${label}`);
 }

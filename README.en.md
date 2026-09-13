@@ -68,6 +68,7 @@ On macOS, after building and configuring `.env`, stop any foreground server on t
 ```sh
 npm run service:install
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.codex-terminal-hub.plist"
+launchctl kickstart "gui/$(id -u)/com.codex-terminal-hub"
 ```
 
 The installer only generates a current-user LaunchAgent. It refuses to overwrite one unless `--force` is supplied, which preserves a backup. It does not automatically restart a running service. Logs are in `~/Library/Logs/CodexTerminalHub/`. Reinstall the agent if the Node or checkout path changes. This is a login agent and does not prevent sleep.

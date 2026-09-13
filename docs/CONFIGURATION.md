@@ -13,6 +13,7 @@
 | `CODEX_PATH` | 自动查找 `codex` | 可选 CLI 路径；缺失时仍可用 Shell 模式 |
 | `CODEX_TERMINAL_TMUX_SOCKET` | 未设置 | 设置后使用 `tmux -L 名称`；1–80 个英文字母、数字、下划线或连字符 |
 | `CODEX_TERMINAL_EXCLUSIVE` | `1` | attach 使用 `-d`，断开同 session 的其他 tmux clients；`0` 只取消此行为，不提供多浏览器用户支持 |
+| `CODEX_TERMINAL_SERVICE_PATH` | Node 目录、用户 `.local/bin`、常见系统/Homebrew 目录 | 仅供 macOS 安装脚本生成 LaunchAgent 的 PATH；修改后重新安装服务配置 |
 
 二进制在 PATH、Node 所在目录及常见系统/Homebrew 目录中查找。服务进程的 PATH 可能不同于交互式 Shell，优先用 `.env` 明确指定必要的路径。
 

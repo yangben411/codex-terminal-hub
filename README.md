@@ -136,6 +136,7 @@ tmux 推荐配置片段见 [examples/tmux.conf](examples/tmux.conf)。请合并�
 ```sh
 npm run service:install
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.codex-terminal-hub.plist"
+launchctl kickstart "gui/$(id -u)/com.codex-terminal-hub"
 ```
 
 安装脚本只生成当前用户的 LaunchAgent，不自动重启服务；已有文件默认拒绝覆盖。需要更新安装路径时，使用 `npm run service:install -- --force`，它会备份旧 plist，然后按命令输出先 bootout 再 bootstrap。`--print` 可仅预览生成内容。
