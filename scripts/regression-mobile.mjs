@@ -71,6 +71,7 @@ try {
       message(data) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) })); }
       send(raw) {
         const data = JSON.parse(raw);
+        if (data.type === "input") (window.__hubInputs ||= []).push(data.data);
         if (data.type === "subscribe") setTimeout(() => this.message({ type: "snapshot", session: data.session, seq: 1, data: "LIVE\r\n" }), 0);
         if (data.type === "ping") this.message({ type: "pong", clientAt: data.clientAt });
         if (data.type === "input") setTimeout(() => this.message({ type: "input-ack", inputId: data.inputId, session: data.session }), 0);
@@ -129,6 +130,11 @@ try {
   await page.waitForFunction(() => document.querySelector("#terminalInput").value === "");
   assert.equal(await page.locator("#terminalInput").evaluate(el => document.activeElement === el), true);
   assert.equal(historyRequests, focusedRequests, "input ACK must not start history loading");
+  const punctuation = "，。！？：；‘’“”【】（）<>@#$%&*+-=_/\\";
+  await page.locator("#terminalInput").fill(punctuation);
+  await page.locator("#terminalInput").press("Enter");
+  await page.waitForFunction(() => document.querySelector("#terminalInput").value === "");
+  assert.ok(await page.evaluate(expected => window.__hubInputs?.some(value => value === `${expected}\r`), punctuation), "punctuation must reach the terminal unchanged");
 
   // Focusing input cancels an already-started touch fling, not just requests.
   await page.evaluate(async () => {
