@@ -1460,12 +1460,31 @@ dialog select { min-height: 42px; padding: 0 11px; }
 
 .composer.docked .quick-keys {
   align-items: center;
+  flex-wrap: nowrap;
   padding: 6px 0 6px 10px;
+}
+
+.composer.docked .mobile-control-deck {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(120px, 0.34fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 0;
+}
+
+.composer.docked .composer-connection {
+  min-height: 36px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #171c23;
 }
 
 .composer.docked .composer-row {
   grid-template-columns: 130px minmax(0, 1fr) auto;
-  padding: 6px 10px;
+  gap: 6px;
+  padding: 0;
 }
 
 .mobile-direction-toggle { display: none; }
@@ -1489,6 +1508,14 @@ dialog select { min-height: 42px; padding: 0 11px; }
     position: relative;
     display: block;
     padding: 0;
+  }
+
+  .composer.docked .composer-connection {
+    min-height: 22px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    padding: 0 8px;
   }
 
   .composer.docked .composer-row {
