@@ -40,6 +40,7 @@ const state = {
 };
 
 const terminalViews = new Map();
+const inputFailures = new Map();
 const tmuxClipboard = new GestureClipboard();
 let tmuxCopyGesture = null;
 const terminalPanelKeepAliveMs = 15 * 60 * 1000;
@@ -59,7 +60,7 @@ const elements = Object.fromEntries([
   "viewTitle", "viewSubtitle", "overviewButton", "multiViewButton", "newWindowButton",
   "openTerminalTab", "overviewView", "terminalView", "emptyView", "sessionCount",
   "sessionGrid", "openSelectedMulti", "multiSelectionHint", "windowStrip", "terminalGrid",
-  "composer", "composerToggle", "composerClose", "quickKeys", "mobileDpad", "targetSession",
+  "composer", "composerToggle", "composerClose", "quickKeys", "mobileDpad", "composerStatus", "targetSession",
   "terminalInput", "sendInputButton", "mobileDirectionToggle", "newSessionDialog", "newSessionForm", "createSessionSubmit",
   "newWindowDialog", "newWindowForm", "newWindowContext", "createWindowSubmit", "clientTakeover",
   "clientTakeoverEyebrow", "clientTakeoverTitle", "clientTakeoverMessage", "clientPresenceDot",
@@ -231,6 +232,25 @@ function setInputTarget(sessionSlug) {
   state.inputDraftSlug = sessionSlug;
   elements.terminalInput.value = inputDraftFor(sessionSlug);
   resetInputHistoryNavigation();
+  updateComposerConnection();
+}
+
+function updateComposerConnection() {
+  if (!elements.composerStatus) return;
+  const slug = state.targetSlug;
+  const view = slug && terminalViews.get(slug);
+  const label = sessionLabel(getSession(slug));
+  const pending = [...state.pendingInputs.values()].some((item) => item.sessionSlug === slug);
+  let status;
+  if (!state.clientActive) status = ["offline", "连接未就绪 · 点击重新连接后才能发送"];
+  else if (inputFailures.has(slug)) status = ["error", "发送未确认 · 输入已保留，请检查后重试"];
+  else if (state.queuedInput?.sessionSlug === slug) status = ["waiting", "等待终端连接 · 输入已暂存"];
+  else if (pending) status = ["sending", "正在发送 · 等待终端确认"];
+  else if (state.streamReady && view?.serverActive && view.inputReady) status = ["ready", "已连接 · 可以输入并发送"];
+  else if (state.streamTimer || [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.stream?.readyState)) status = ["connecting", "正在连接终端 · 发送内容会暂存"];
+  else status = ["offline", "终端未连接 · 输入会暂存，连接后发送"];
+  elements.composerStatus.dataset.state = status[0];
+  elements.composerStatus.textContent = `${label ? `${label} · ` : ""}${status[1]}`;
 }
 
 function activeWindow(session) {
@@ -313,6 +333,7 @@ function showTakeover(status) {
     ? "原页面可能只是短暂断网，服务仍在保护窗口内。需要切换到这里时，请手动重新连接。"
     : "tmux 和 Codex 仍在后台运行。点击重新连接后，本页面会成为唯一活动页面。";
   elements.clientTakeover.hidden = false;
+  updateComposerConnection();
 }
 
 async function claimBrowser({ force = false } = {}) {
@@ -330,6 +351,7 @@ async function claimBrowser({ force = false } = {}) {
   elements.connectionDot.classList.add("online");
   elements.connectionDot.title = "控制连接已建立";
   connectStream();
+  updateComposerConnection();
   return true;
 }
 
@@ -347,6 +369,7 @@ async function heartbeat() {
     }
   } catch {
     elements.connectionDot.classList.remove("online");
+    updateComposerConnection();
   }
 }
 
@@ -370,6 +393,7 @@ function connectStream() {
   socket.addEventListener("open", () => {
     state.streamAttempt = 0;
     elements.connectionDot.classList.add("online");
+    updateComposerConnection();
   });
   socket.addEventListener("message", (event) => {
     try {
@@ -386,6 +410,7 @@ function connectStream() {
       view.inputReady = false;
     }
     elements.connectionDot.classList.remove("online");
+    updateComposerConnection();
     if (event.code === 4001) {
       showTakeover({ occupied: true, phase: "live", inUse: true });
       return;
@@ -411,6 +436,7 @@ function closeStream(clearClient = true) {
     view.serverActive = false;
     view.inputReady = false;
   }
+  updateComposerConnection();
 }
 
 function handleStreamMessage(message) {
@@ -424,6 +450,7 @@ function handleStreamMessage(message) {
     state.streamReady = true;
     streamSend({ type: "ping", clientAt: Date.now() });
     syncVisibleTerminals();
+    updateComposerConnection();
     return;
   }
   if (message.type === "input-ack") {
@@ -431,6 +458,7 @@ function handleStreamMessage(message) {
     if (!pending) return;
     clearTimeout(pending.timer);
     state.pendingInputs.delete(message.inputId);
+    inputFailures.delete(pending.sessionSlug);
     rememberInput(pending.sessionSlug, pending.text);
     if (state.inputDraftSlug === pending.sessionSlug && elements.terminalInput.value === pending.text) {
       elements.terminalInput.value = "";
@@ -446,6 +474,7 @@ function handleStreamMessage(message) {
     const session = getSession(message.session);
     showToast(`已发送到 ${sessionLabel(session)}`);
     elements.terminalInput.focus({ preventScroll: true });
+    updateComposerConnection();
     return;
   }
   const view = terminalViews.get(message.session);
@@ -471,6 +500,7 @@ function handleStreamMessage(message) {
       view.flowState = "实时";
       view.inputReady = true;
       updateTerminalStatus(view);
+      updateComposerConnection();
       flushQueuedComposerInput(view.slug);
     });
     return;
@@ -1506,15 +1536,20 @@ function sendComposerText(text, sessionSlug) {
     state.queuedInput = { text, sessionSlug };
     showToast("终端正在连接，连接后会自动发送", "error");
     connectStream();
+    updateComposerConnection();
     return;
   }
   const timer = setTimeout(() => {
     if (!state.pendingInputs.has(inputId)) return;
     state.pendingInputs.delete(inputId);
+    inputFailures.set(sessionSlug, true);
     resetComposerSendButton();
     showToast("未收到终端确认，输入内容已保留，请重试", "error");
+    updateComposerConnection();
   }, 5000);
   state.pendingInputs.set(inputId, { text, sessionSlug, timer });
+  inputFailures.delete(sessionSlug);
+  updateComposerConnection();
 }
 
 function flushQueuedComposerInput(sessionSlug) {
@@ -1537,6 +1572,7 @@ function submitComposerInput() {
     elements.sendInputButton.disabled = true;
     elements.sendInputButton.textContent = "连接后发送…";
     connectStream();
+    updateComposerConnection();
     return;
   }
   sendComposerText(text, sessionSlug);

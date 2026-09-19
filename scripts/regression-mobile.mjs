@@ -74,7 +74,7 @@ try {
         if (data.type === "input") (window.__hubInputs ||= []).push(data.data);
         if (data.type === "subscribe") setTimeout(() => this.message({ type: "snapshot", session: data.session, seq: 1, data: "LIVE\r\n" }), 0);
         if (data.type === "ping") this.message({ type: "pong", clientAt: data.clientAt });
-        if (data.type === "input") setTimeout(() => this.message({ type: "input-ack", inputId: data.inputId, session: data.session }), 0);
+        if (data.type === "input") setTimeout(() => this.message({ type: "input-ack", inputId: data.inputId, session: data.session }), 100);
       }
       close() { this.readyState = 3; }
     }
@@ -82,6 +82,7 @@ try {
   });
   await page.goto(`http://127.0.0.1:${server.address().port}/?session=${session.slug}`);
   await page.waitForFunction(() => [...window.hubTest?.terminalViews.values() || []].some(view => view.inputReady && view.historyReady));
+  assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "input-ready only after terminal snapshot");
   const viewAction = async action => page.evaluate(action);
   await viewAction(async () => { await hubTest.openHistoryCache([...hubTest.terminalViews.values()][0]); });
   await page.waitForTimeout(250);
@@ -127,7 +128,9 @@ try {
   assert.equal(historyRequests, focusedRequests, "keyboard changes must not trigger history requests");
   await page.locator("#terminalInput").fill("测试输入");
   await page.locator("#terminalInput").press("Enter");
+  assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "sending", "show pending terminal acknowledgement");
   await page.waitForFunction(() => document.querySelector("#terminalInput").value === "");
+  assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "return to ready after acknowledgement");
   assert.equal(await page.locator("#terminalInput").evaluate(el => document.activeElement === el), true);
   assert.equal(historyRequests, focusedRequests, "input ACK must not start history loading");
   const punctuation = "，。！？：；‘’“”【】（）<>@#$%&*+-=_/\\";

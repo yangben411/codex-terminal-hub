@@ -10,7 +10,7 @@
     <title>Codex Terminal Hub</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/terminal-icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css?v=20260919-input" />
+    <link rel="stylesheet" href="/app.css?v=20260919-status" />
     <link rel="stylesheet" href="/terminal.css?v=0.3.0" />
   </head>
   <body>
@@ -125,6 +125,7 @@
             <button data-key="ctrl-l">Ctrl-L</button>
           </div>
           <div class="mobile-control-deck">
+            <div class="composer-connection" id="composerStatus" data-state="offline" role="status" aria-live="polite">终端未连接</div>
             <div class="mobile-dpad" id="mobileDpad" role="group" aria-label="移动端方向键">
               <button class="dpad-up" data-key="up" aria-label="向上">↑</button>
               <button class="dpad-left" data-key="left" aria-label="向左">←</button>
@@ -282,6 +283,6 @@
       </form>
     </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/terminal.js?v=20260919-input" type="module"></script>
+    <script src="/terminal.js?v=20260919-status" type="module"></script>
   </body>
 </html>

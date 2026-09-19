@@ -879,6 +879,35 @@ p { margin-top: 0; }
 
 .mobile-control-deck { display: contents; }
 
+.composer-connection {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 24px;
+  padding: 2px 12px;
+  color: #b2bdc9;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer-connection::before {
+  content: "";
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: #77818c;
+}
+.composer-connection[data-state="ready"]::before { background: #79f2c0; box-shadow: 0 0 8px #79f2c077; }
+.composer-connection[data-state="connecting"]::before,
+.composer-connection[data-state="waiting"]::before,
+.composer-connection[data-state="sending"]::before { background: #ffcc66; }
+.composer-connection[data-state="error"]::before,
+.composer-connection[data-state="offline"]::before { background: #ff7b86; }
+
 .mobile-dpad { display: none; }
 
 .composer-row {
