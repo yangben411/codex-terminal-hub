@@ -1492,10 +1492,14 @@ dialog select { min-height: 42px; padding: 0 11px; }
   }
 
   .composer.docked .composer-row {
-    grid-template-columns: auto 82px minmax(0, 1fr) auto;
-    gap: 6px;
+    grid-auto-flow: column;
+    grid-template-columns: 42px 76px minmax(0, 1fr) auto;
+    gap: 4px;
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   }
+
+  .composer.docked .composer-row > * { min-width: 0; }
+  .composer.docked .composer-row textarea { width: 100%; }
 
   .composer.docked .target-picker {
     min-height: 40px;
@@ -1536,8 +1540,9 @@ dialog select { min-height: 42px; padding: 0 11px; }
 
 @media (max-width: 390px) {
   .composer.docked .composer-row {
-    grid-template-columns: auto 70px minmax(78px, 1fr) auto;
-    padding-inline: 6px;
+    grid-template-columns: 38px 64px minmax(0, 1fr) auto;
+    gap: 3px;
+    padding-inline: 5px;
   }
 
   .composer.docked .send-button { padding-inline: 9px; }
