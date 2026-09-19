@@ -1695,7 +1695,11 @@ elements.terminalInput.addEventListener("keydown", (event) => {
     if (navigateInputHistory(1)) event.preventDefault();
     return;
   }
-  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.sendInputButton.click(); }
+  if (event.key === "Enter" && !event.shiftKey && !event.repeat) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!elements.sendInputButton.disabled) submitComposerInput();
+  }
 });
 elements.terminalInput.addEventListener("input", () => {
   resetInputHistoryNavigation();
