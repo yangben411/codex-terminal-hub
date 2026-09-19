@@ -17,6 +17,8 @@ The smoke test uses an ephemeral port and a unique tmux socket; it must never ta
 
 For frontend changes, also manually test desktop resizing, small Safari windows, mobile soft keyboards, composing Chinese with IME, input submission, session switching, history pagination, focus return and clipboard denial. Automated protocol tests do not prove those interactions work in every browser.
 
+Optional browser regression: with Playwright and Chromium available, run `node scripts/regression-mobile.mjs`. `PLAYWRIGHT_MODULE` can point to an externally installed Playwright `index.mjs`, and `CHROMIUM_EXECUTABLE_PATH` can select an existing browser. The script serves synthetic sessions on an ephemeral port and never connects to the live Hub. Its simulated visual viewport verifies keyboard layout and focus/history behavior, but does not replace testing an actual mobile keyboard in Safari.
+
 ## Source layout
 
 Edit `src/app.js` and the small browser helper modules, not generated `public/terminal.js`. Edit static markup/styles under `public/`. Run the build after changes; generated bundles and dependencies are ignored by Git.

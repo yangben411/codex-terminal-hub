@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fix mobile composer focus triggering history pagination: only explicit reading gestures request earlier pages; cancel touch momentum on focus/cancel, and discard late page responses after returning live.
+- Place the composer in a dedicated bottom grid row so keyboard viewport changes shrink the terminal without covering input. Avoid programmatic focus scrolling.
+- Add an isolated browser regression for keyboard resize/pan, history requests, input submission, touch momentum and desktop layout.
+
 ## 0.3.0 — 2026-09-13
 
 First standalone public release of the consolidated implementation.

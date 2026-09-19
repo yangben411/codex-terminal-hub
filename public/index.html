@@ -10,7 +10,7 @@
     <title>Codex Terminal Hub</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/terminal-icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css?v=0.3.0" />
+    <link rel="stylesheet" href="/app.css?v=20260919-input" />
     <link rel="stylesheet" href="/terminal.css?v=0.3.0" />
   </head>
   <body>
@@ -114,41 +114,41 @@
           <button class="primary-button" data-action="new-session">新建第一个 Session</button>
         </section>
 
+        <section class="composer" id="composer" hidden>
+          <header class="composer-heading">
+            <strong>终端输入</strong>
+            <button type="button" id="composerClose" aria-label="收起输入面板">收起</button>
+          </header>
+          <div class="quick-keys" id="quickKeys">
+            <button data-key="tab">Tab</button>
+            <button data-key="ctrl-c">Ctrl-C</button>
+            <button data-key="ctrl-l">Ctrl-L</button>
+          </div>
+          <div class="mobile-control-deck">
+            <div class="mobile-dpad" id="mobileDpad" role="group" aria-label="移动端方向键">
+              <button class="dpad-up" data-key="up" aria-label="向上">↑</button>
+              <button class="dpad-left" data-key="left" aria-label="向左">←</button>
+              <button class="dpad-enter" data-key="enter" aria-label="确认">
+                <span>↵</span>
+                <small>Enter</small>
+              </button>
+              <button class="dpad-right" data-key="right" aria-label="向右">→</button>
+              <button class="dpad-down" data-key="down" aria-label="向下">↓</button>
+            </div>
+            <div class="composer-row">
+              <button class="mobile-direction-toggle" id="mobileDirectionToggle" type="button" aria-expanded="false">方向</button>
+              <label class="target-picker">
+                <span>发送到</span>
+                <select id="targetSession"></select>
+              </label>
+          <textarea id="terminalInput" rows="1" inputmode="text" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="输入会自动保存；↑↓ 切换最近 3 条输入"></textarea>
+              <button class="send-button" id="sendInputButton" type="button" aria-label="发送并回车">发送 ↵</button>
+            </div>
+          </div>
+        </section>
+
       </main>
     </div>
-
-    <section class="composer" id="composer" hidden>
-      <header class="composer-heading">
-        <strong>终端输入</strong>
-        <button type="button" id="composerClose" aria-label="收起输入面板">收起</button>
-      </header>
-      <div class="quick-keys" id="quickKeys">
-        <button data-key="tab">Tab</button>
-        <button data-key="ctrl-c">Ctrl-C</button>
-        <button data-key="ctrl-l">Ctrl-L</button>
-      </div>
-      <div class="mobile-control-deck">
-        <div class="mobile-dpad" id="mobileDpad" role="group" aria-label="移动端方向键">
-          <button class="dpad-up" data-key="up" aria-label="向上">↑</button>
-          <button class="dpad-left" data-key="left" aria-label="向左">←</button>
-          <button class="dpad-enter" data-key="enter" aria-label="确认">
-            <span>↵</span>
-            <small>Enter</small>
-          </button>
-          <button class="dpad-right" data-key="right" aria-label="向右">→</button>
-          <button class="dpad-down" data-key="down" aria-label="向下">↓</button>
-        </div>
-        <div class="composer-row">
-          <button class="mobile-direction-toggle" id="mobileDirectionToggle" type="button" aria-expanded="false">方向</button>
-          <label class="target-picker">
-            <span>发送到</span>
-            <select id="targetSession"></select>
-          </label>
-          <textarea id="terminalInput" rows="1" placeholder="输入会自动保存；↑↓ 切换最近 3 条输入"></textarea>
-          <button class="send-button" id="sendInputButton" type="button" aria-label="发送并回车">发送 ↵</button>
-        </div>
-      </div>
-    </section>
 
     <section class="client-takeover" id="clientTakeover" role="alertdialog" aria-modal="true" hidden>
       <div class="client-takeover-card">
@@ -282,6 +282,6 @@
       </form>
     </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/terminal.js?v=0.3.0" type="module"></script>
+    <script src="/terminal.js?v=20260919-input" type="module"></script>
   </body>
 </html>

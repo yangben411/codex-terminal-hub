@@ -29,6 +29,8 @@ body {
   background: var(--bg);
   color: var(--text);
   overflow: hidden;
+  overflow-anchor: none;
+  overscroll-behavior: none;
 }
 
 body {
@@ -1392,21 +1394,20 @@ dialog select { min-height: 42px; padding: 0 11px; }
   .send-button { padding-inline: 10px; }
 }
 
-/* The composer is pinned to the root container. Its measured height is reserved
-   as padding, so the terminal only receives the remaining visible area. */
+/* A real bottom grid row: keyboard changes shrink only the terminal row. */
 .main-area.terminal-active {
-  grid-template-rows: auto minmax(0, 1fr);
-  padding-bottom: var(--composer-height, 54px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .main-area.terminal-active > .terminal-view { grid-row: 2; }
 
 .composer.docked {
-  position: absolute;
+  position: relative;
+  grid-row: 3;
   z-index: 22;
   right: 0;
   bottom: 0;
-  left: var(--sidebar-width);
+  left: 0;
   display: grid;
   width: auto;
   max-width: none;
@@ -1423,6 +1424,7 @@ dialog select { min-height: 42px; padding: 0 11px; }
   pointer-events: auto;
   transform: none;
   visibility: visible;
+  transition: none;
 }
 
 .composer.docked .composer-heading { display: none; }
@@ -1451,6 +1453,8 @@ dialog select { min-height: 42px; padding: 0 11px; }
     border-radius: 0;
     transform: none;
   }
+
+  .composer textarea { font-size: 16px; }
 
   .composer.docked .mobile-control-deck {
     position: relative;
