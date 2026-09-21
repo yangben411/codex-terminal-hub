@@ -617,6 +617,7 @@ async function loadEarlierHistory(view) {
   view.historyLoadingEarlier = true;
   updateTerminalStatus(view);
   const before = view.historyNextBefore;
+  let pageAdvanced = false;
   try {
     const page = await api(`/api/sessions/${view.slug}/history?before=${encodeURIComponent(before)}`);
     // Discard responses from a reading session exited while the request ran.
@@ -635,6 +636,8 @@ async function loadEarlierHistory(view) {
     view.historyContent = `${page.content}${needsSeparator ? "\r\n" : ""}${view.historyContent || ""}`;
     view.historyNextBefore = page.nextBefore ?? null;
     view.historyHasEarlier = Boolean(page.hasEarlier && page.nextBefore !== null);
+    pageAdvanced = view.historyNextBefore !== null && view.historyNextBefore > before;
+    view.historyError = null;
     await new Promise((resolve) => {
       ensureHistoryScrollback(view, view.historyContent);
       view.historyTerm.reset();
@@ -652,6 +655,13 @@ async function loadEarlierHistory(view) {
   } finally {
     view.historyLoadingEarlier = false;
     updateTerminalStatus(view);
+    // Continue a gesture-initiated read if a short page still leaves us near
+    // the boundary. Do not chain failed requests or a stale reading session.
+    if (pageAdvanced && view.historyGeneration === generation) {
+      requestAnimationFrame(() => {
+        if (view.historyGeneration === generation) requestEarlierHistory(view);
+      });
+    }
   }
 }
 
@@ -711,10 +721,11 @@ function composerHasFocus() {
   return elements.composer.contains(document.activeElement);
 }
 
-// Only explicit reading gestures may paginate. xterm onScroll also fires on
-// reset/write/fit, so it must never initiate another network request.
+// Start pagination from reading gestures, with continuation after a successful
+// page. Never start it from xterm reset/write/fit scroll events.
 function requestEarlierHistory(view) {
-  if (view.historyTerm.buffer.active.viewportY <= 8) loadEarlierHistory(view);
+  const preloadRows = Math.max(8, view.historyTerm.rows * 2);
+  if (view.historyTerm.buffer.active.viewportY <= preloadRows) loadEarlierHistory(view);
 }
 
 function installTouchScroller(view, host, getTerminal, { openHistoryOnUp = false } = {}) {
