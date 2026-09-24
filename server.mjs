@@ -1061,7 +1061,16 @@ async function handleApi(request, response, url) {
       return true;
     }
     if (url.searchParams.get("refresh") === "1") {
-      await refreshSessionHistoryCache(session);
+      // A background capture may predate this reading request. Wait for it,
+      // then capture anew; never silently return an old snapshot on failure.
+      await historyRefreshes.get(session.name);
+      const snapshot = await refreshSessionHistoryCache(session);
+      if (!snapshot) {
+        sendJson(response, 503, { error: "最新历史缓存暂时无法建立，请稍后重试" });
+        return true;
+      }
+      sendJson(response, 200, { ...snapshot, source: "cache", pending: false, refreshing: false, cacheAgeMs: 0 });
+      return true;
     }
     sendJson(response, 200, cachedSessionHistory(session));
     return true;

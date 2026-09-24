@@ -499,6 +499,7 @@ function handleStreamMessage(message) {
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
       view.flowState = "实时";
       view.inputReady = true;
+      if (!view.historyActive) view.term.scrollToBottom();
       updateTerminalStatus(view);
       updateComposerConnection();
       flushQueuedComposerInput(view.slug);
@@ -510,6 +511,7 @@ function handleStreamMessage(message) {
     view.term.write(message.data || "", () => {
       view.lastSeq = message.seq;
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
+      if (!view.historyActive) view.term.scrollToBottom();
       updateTerminalStatus(view);
     });
     return;
@@ -585,8 +587,8 @@ async function loadHistoryCache(view, { refresh = false } = {}) {
       return snapshot;
     })
     .then((snapshot) => {
-      if (!snapshot?.content) return snapshot;
-      if (view.historyCapturedAt === snapshot.capturedAt) return snapshot;
+      if (!snapshot || snapshot.pending || typeof snapshot.content !== "string") throw new Error("最新缓存尚未就绪，请稍后重试");
+      if (!refresh && view.historyCapturedAt === snapshot.capturedAt) return snapshot;
       view.historyCapturedAt = snapshot.capturedAt;
       view.historyContent = snapshot.content;
       view.historyNextBefore = snapshot.nextBefore ?? null;
@@ -671,6 +673,10 @@ async function openHistoryCache(view) {
   const generation = ++view.historyGeneration;
   view.historyActive = true;
   view.historyOpening = true;
+  view.historyReady = false;
+  view.historyError = null;
+  view.historyLayer.setAttribute("aria-busy", "true");
+  for (const cancel of view.cancelHistoryGestures) cancel();
   view.historyFrozenAt = Date.now();
   view.historyLiveBaseline = view.liveOutputBytes;
   view.historyLayer.hidden = false;
@@ -680,22 +686,25 @@ async function openHistoryCache(view) {
   // unchanged until the user returns to live mode.
   const snapshot = await loadHistoryCache(view, { refresh: true });
   if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus()) return false;
-  if (!view.historyReady) {
+  if (!snapshot || !view.historyReady) {
     view.historyActive = false;
     view.historyOpening = false;
     view.historyLayer.hidden = true;
+    view.historyLayer.removeAttribute("aria-busy");
     updateTerminalStatus(view);
     showToast(view.historyError || "历史缓存仍在建立，请稍后再试", "error");
     return false;
   }
   if (!view.historyActive) return false;
-  view.historyOpening = false;
   view.historyFrozenAt = snapshot?.capturedAt || Date.now();
   requestAnimationFrame(() => {
     if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus()) return;
     try { view.historyFit.fit(); } catch {}
     view.historyTerm.scrollToBottom();
     view.historyTerm.scrollLines(-4);
+    view.historyOpening = false;
+    view.historyLayer.removeAttribute("aria-busy");
+    updateTerminalStatus(view);
   });
   updateTerminalStatus(view);
   return true;
@@ -712,6 +721,7 @@ function returnToLive(view, { focus = true } = {}) {
   view.historyActive = false;
   view.historyOpening = false;
   view.historyLayer.hidden = true;
+  view.historyLayer.removeAttribute("aria-busy");
   view.term.scrollToBottom();
   if (focus) view.term.focus();
   updateTerminalStatus(view);
@@ -744,6 +754,7 @@ function installTouchScroller(view, host, getTerminal, { openHistoryOnUp = false
     gesture = { id: event.pointerId, y: event.clientY, lastY: event.clientY, lastAt: performance.now(), velocity: 0, carried: 0 };
   }, { capture: true });
   host.addEventListener("pointermove", (event) => {
+    if (view.historyOpening) { event.preventDefault(); cancelGesture(); return; }
     if (!gesture || event.pointerId !== gesture.id) return;
     const now = performance.now();
     const delta = event.clientY - gesture.lastY;
@@ -751,6 +762,7 @@ function installTouchScroller(view, host, getTerminal, { openHistoryOnUp = false
       event.preventDefault();
       if (openHistoryOnUp && !view.historyActive && delta > 0) {
         openHistoryCache(view);
+        if (!gesture) return;
         gesture.lastY = event.clientY;
         gesture.lastAt = now;
         gesture.velocity = 0;
@@ -776,7 +788,7 @@ function installTouchScroller(view, host, getTerminal, { openHistoryOnUp = false
     let velocity = gesture.velocity;
     gesture = null;
     const step = () => {
-      if (!view.visible || !view.historyActive || composerHasFocus()) { cancelGesture(); return; }
+      if (!view.visible || !view.historyActive || view.historyOpening || composerHasFocus()) { cancelGesture(); return; }
       velocity *= 0.92;
       if (Math.abs(velocity) < 0.015) {
         momentum = 0;
@@ -839,12 +851,20 @@ function ensureTerminalView(session) {
     <div class="xterm-host" data-xterm-host></div>
     <section class="xterm-history-layer" data-history-layer hidden>
       <div class="xterm-history-host" data-history-host></div>
+      <div class="history-wait" role="status">正在加载最新缓存，请稍候…</div>
     </section>
     <button type="button" class="terminal-history-status" hidden>实时</button>`;
   elements.terminalGrid.append(panel);
   const host = panel.querySelector("[data-xterm-host]");
   const historyLayer = panel.querySelector("[data-history-layer]");
   const historyHost = panel.querySelector("[data-history-host]");
+  for (const type of ["wheel", "touchmove", "pointerdown", "keydown"]) {
+    historyLayer.addEventListener(type, (event) => {
+      if (!view.historyOpening) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, { capture: true, passive: false });
+  }
   const fit = new FitAddon();
   const search = new SearchAddon();
   const historyFit = new FitAddon();

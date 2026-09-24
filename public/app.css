@@ -752,6 +752,21 @@ p { margin-top: 0; }
 
 .xterm-history-host .xterm-cursor-layer { display: none; }
 
+.history-wait { display: none; }
+.xterm-history-layer[aria-busy="true"] .xterm-history-host { visibility: hidden; }
+.xterm-history-layer[aria-busy="true"] .history-wait {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  color: #b2bdc9;
+  background: #050607;
+  font-size: 13px;
+  touch-action: none;
+  cursor: progress;
+}
+
 .terminal-panel-spacer { flex: 1; }
 
 .terminal-panel-heading button {
