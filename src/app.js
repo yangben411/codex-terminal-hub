@@ -26,7 +26,6 @@ const state = {
   streamAttempt: 0,
   streamTimer: null,
   idleSuspended: false,
-  latencyMs: null,
   pendingInputs: new Map(),
   queuedInput: null,
   inputHistoryIndex: -1,
@@ -246,7 +245,9 @@ function updateComposerConnection() {
   else if (inputFailures.has(slug)) status = ["error", "发送未确认 · 输入已保留，请检查后重试"];
   else if (state.queuedInput?.sessionSlug === slug) status = ["waiting", "等待终端连接 · 输入已暂存"];
   else if (pending) status = ["sending", "正在发送 · 等待终端确认"];
-  else if (state.streamReady && view?.serverActive && view.inputReady) status = ["ready", "已连接 · 可以输入并发送"];
+  else if (view?.sessionConnected === false) status = ["offline", "session 已断开 · 等待恢复连接"];
+  else if (sessionLatency(view) === "连接无响应") status = ["offline", "连接无响应 · 等待重新确认"];
+  else if (sessionLatency(view).endsWith(" ms")) status = ["ready", "已连接 · 可以输入并发送"];
   else if (state.streamTimer || [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.stream?.readyState)) status = ["connecting", "正在连接终端 · 发送内容会暂存"];
   else status = ["offline", "终端未连接 · 输入会暂存，连接后发送"];
   elements.composerStatus.dataset.state = status[0];
@@ -388,6 +389,7 @@ function connectStream() {
   if (!state.clientActive || [WebSocket.OPEN, WebSocket.CONNECTING].includes(state.stream?.readyState)) return;
   clearTimeout(state.streamTimer);
   state.streamReady = false;
+  resetSessionLatency();
   const socket = new WebSocket(streamUrl());
   state.stream = socket;
   socket.addEventListener("open", () => {
@@ -396,6 +398,7 @@ function connectStream() {
     updateComposerConnection();
   });
   socket.addEventListener("message", (event) => {
+    if (state.stream !== socket) return;
     try {
       handleStreamMessage(JSON.parse(event.data));
     } catch (error) {
@@ -410,6 +413,7 @@ function connectStream() {
       view.inputReady = false;
     }
     elements.connectionDot.classList.remove("online");
+    resetSessionLatency();
     updateComposerConnection();
     if (event.code === 4001) {
       showTakeover({ occupied: true, phase: "live", inUse: true });
@@ -436,14 +440,59 @@ function closeStream(clearClient = true) {
     view.serverActive = false;
     view.inputReady = false;
   }
+  resetSessionLatency();
   updateComposerConnection();
 }
 
+const sessionProbeTimeoutMs = 12000;
+
+function sessionLatency(view) {
+  if (!state.clientActive || !state.streamReady || state.stream?.readyState !== WebSocket.OPEN) return "已断开";
+  if (view?.sessionConnected === false || ["会话已结束", "连接错误"].includes(view?.flowState)) return "已断开";
+  if (!view || !view.serverActive || !view.inputReady) return "未连接";
+  if (inputFailures.has(view.slug)) return "输入未确认";
+  const now = Date.now();
+  if ((view.sessionPongAt && now - view.sessionPongAt > sessionProbeTimeoutMs)
+    || (!view.sessionPongAt && view.sessionCheckStartedAt && now - view.sessionCheckStartedAt > sessionProbeTimeoutMs)) return "连接无响应";
+  if (!view.sessionPongAt || view.sessionLatencyMs == null) return "确认连接中";
+  return `${Math.round(view.sessionLatencyMs)} ms`;
+}
+
+function resetSessionLatency() {
+  for (const view of terminalViews.values()) {
+    view.sessionPongAt = 0;
+    view.sessionProbeAt = 0;
+    view.sessionCheckStartedAt = 0;
+    view.sessionLatencyMs = null;
+    view.sessionConnected = null;
+    updateTerminalStatus(view);
+  }
+  updateTerminalSubtitle();
+}
+
+function probeSession(view) {
+  if (!state.streamReady || !view.serverActive || !view.inputReady) return;
+  const now = Date.now();
+  if (view.sessionProbeAt && now - view.sessionProbeAt <= sessionProbeTimeoutMs) return;
+  view.sessionCheckStartedAt ||= now;
+  view.sessionProbeAt = now;
+  streamSend({ type: "session-ping", session: view.slug, clientAt: now });
+}
+
 function handleStreamMessage(message) {
-  if (message.type === "pong") {
-    if (message.clientAt) state.latencyMs = Math.max(0, Date.now() - message.clientAt);
-    for (const view of terminalViews.values()) updateTerminalStatus(view);
+  if (message.type === "session-pong") {
+    const view = terminalViews.get(message.session);
+    if (!view || !view.serverActive || !view.inputReady || message.clientAt !== view.sessionProbeAt) return;
+    view.sessionProbeAt = 0;
+    view.sessionConnected = message.connected === true;
+    view.sessionPongAt = message.connected ? Date.now() : 0;
+    view.sessionLatencyMs = message.connected ? Date.now() - message.clientAt : null;
+    updateTerminalStatus(view);
     updateTerminalSubtitle();
+    updateComposerConnection();
+    return;
+  }
+  if (message.type === "pong") {
     return;
   }
   if (message.type === "ready") {
@@ -499,6 +548,7 @@ function handleStreamMessage(message) {
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
       view.flowState = "实时";
       view.inputReady = true;
+      probeSession(view);
       if (!view.historyActive) view.term.scrollToBottom();
       updateTerminalStatus(view);
       updateComposerConnection();
@@ -522,6 +572,10 @@ function handleStreamMessage(message) {
     return;
   }
   if (message.type === "exit") {
+    view.inputReady = false;
+    view.sessionLatencyMs = null;
+    updateTerminalSubtitle();
+    updateComposerConnection();
     view.flowState = "会话已结束";
     view.term.write("\r\n\x1b[33m[tmux 会话已结束；终端连接已关闭]\x1b[0m\r\n");
     updateTerminalStatus(view);
@@ -530,6 +584,10 @@ function handleStreamMessage(message) {
     return;
   }
   if (message.type === "error") {
+    view.inputReady = false;
+    view.sessionLatencyMs = null;
+    updateTerminalSubtitle();
+    updateComposerConnection();
     view.flowState = "连接错误";
     updateTerminalStatus(view);
     showToast(message.message || "终端连接错误", "error");
@@ -554,7 +612,7 @@ function updateTerminalStatus(view) {
   }
   const behind = Math.max(0, view.term.buffer.active.baseY - view.term.buffer.active.viewportY);
   view.behind = behind;
-  const latency = state.latencyMs === null ? "测量中" : `${Math.round(state.latencyMs)} ms`;
+  const latency = sessionLatency(view);
   view.status.textContent = behind > 0
     ? `缓存历史 · 距实时 ${behind} 行`
     : view.flowState === "实时"
@@ -567,7 +625,7 @@ function updateTerminalStatus(view) {
 function updateTerminalSubtitle() {
   const sessions = visibleSessions();
   if (!sessions.length) return;
-  const latency = state.latencyMs === null ? "测量中" : `${Math.round(state.latencyMs)} ms`;
+  const latency = sessionLatency(terminalViews.get(state.targetSlug || sessions[0].slug));
   elements.viewSubtitle.textContent = sessions.length === 1
     ? `延迟 ${latency} · 滚动缓存按需加载 · ${compactPath(sessions[0].path)}`
     : `延迟 ${latency} · 一条连接 · ${sessions.length} 个 tmux sessions`;
@@ -1026,6 +1084,11 @@ function activateTerminalView(session) {
     fitTerminal(view);
     if (!view.serverActive && state.streamReady) {
       view.inputReady = false;
+      view.sessionPongAt = 0;
+      view.sessionProbeAt = 0;
+      view.sessionCheckStartedAt = 0;
+      view.sessionLatencyMs = null;
+      view.sessionConnected = null;
       view.serverActive = true;
       streamSend({ type: "subscribe", session: view.slug, cols: view.term.cols, rows: view.term.rows });
     }
@@ -1851,8 +1914,13 @@ window.addEventListener("beforeunload", () => {
 setInterval(heartbeat, 3000);
 setInterval(() => { if (state.streamReady) streamSend({ type: "ping", clientAt: Date.now() }); }, 5000);
 setInterval(() => {
-  for (const view of terminalViews.values()) if (view.visible && view.historyActive) updateTerminalStatus(view);
+  for (const view of terminalViews.values()) if (view.visible) updateTerminalStatus(view);
+  updateTerminalSubtitle();
+  updateComposerConnection();
 }, 1000);
+setInterval(() => {
+  for (const view of terminalViews.values()) if (view.visible) probeSession(view);
+}, 5000);
 setInterval(() => refreshSessions({ quiet: true }), 15000);
 setInterval(() => {
   const cutoff = Date.now() - terminalPanelKeepAliveMs;

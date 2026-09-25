@@ -74,6 +74,7 @@ try {
         if (data.type === "input") (window.__hubInputs ||= []).push(data.data);
         if (data.type === "subscribe") setTimeout(() => this.message({ type: "snapshot", session: data.session, seq: 1, data: "LIVE\r\n" }), 0);
         if (data.type === "ping") this.message({ type: "pong", clientAt: data.clientAt });
+        if (data.type === "session-ping") this.message({ type: "session-pong", session: data.session, clientAt: data.clientAt, connected: true });
         if (data.type === "input") setTimeout(() => this.message({ type: "input-ack", inputId: data.inputId, session: data.session }), 100);
       }
       close() { this.readyState = 3; }

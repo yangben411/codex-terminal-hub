@@ -866,6 +866,16 @@ async function handleTerminalSocketMessage(record, raw) {
   }
   const subscription = record.subscriptions.get(`${message.session || ""}`);
 
+  if (message.type === "session-ping") {
+    sendTerminalMessage(record.socket, {
+      type: "session-pong",
+      session: `${message.session || ""}`,
+      clientAt: Number(message.clientAt) || null,
+      connected: Boolean(subscription?.active && subscription.broker.pty && !subscription.broker.closed),
+    });
+    return;
+  }
+
   if (message.type === "subscribe") {
     await subscribeTerminal(record, message);
     return;

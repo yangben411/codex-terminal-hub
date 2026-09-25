@@ -76,29 +76,35 @@ try {
   const inputId = `input_${Date.now()}`;
   socket = new WebSocket(`${base.replace(/^http/, "ws")}/api/terminal-stream?clientId=${clientId}`);
   await new Promise((resolve, reject) => {
-    let output = "", sent = false, pong = false, ack = false;
+    let output = "", sent = false, pong = false, ack = false, sessionPong = false, disconnectedPong = false;
     const timer = setTimeout(() => reject(new Error(`Terminal timeout: ${output.slice(-500)}`)), 10000);
     const send = data => socket.send(JSON.stringify(data));
     socket.on("error", error => { clearTimeout(timer); reject(error); });
     socket.on("message", raw => {
       const message = JSON.parse(raw.toString());
       if (message.type === "ready") {
+        send({ type: "session-ping", session: session.slug, clientAt: Date.now() });
         send({ type: "subscribe", session: session.slug, cols: 90, rows: 24 });
         send({ type: "ping", clientAt: Date.now() });
       }
       if (message.type === "pong") pong = true;
+      if (message.type === "session-pong" && message.session === session.slug) {
+        if (message.connected === true) sessionPong = true;
+        if (message.connected === false) disconnectedPong = true;
+      }
       if (message.type === "input-ack" && message.inputId === inputId) ack = true;
       if (["snapshot", "output"].includes(message.type)) {
         output += message.data || "";
         send({ type: "ack", session: session.slug, seq: message.seq });
         if (!sent && message.type === "snapshot") {
           sent = true;
+          send({ type: "session-ping", session: session.slug, clientAt: Date.now() });
           // Split marker in the command so an echoed command is not a passing result.
           send({ type: "input", session: session.slug, inputId, data: `printf '%s%s\\n' 'OUTPUT_' '${marker.slice(7)}'\r` });
         }
       }
       if (message.type === "error") { clearTimeout(timer); reject(new Error(message.message)); }
-      if (pong && ack && output.includes(marker)) { clearTimeout(timer); resolve(); }
+      if (pong && sessionPong && disconnectedPong && ack && output.includes(marker)) { clearTimeout(timer); resolve(); }
     });
   });
   const history = await request(`/api/sessions/${session.slug}/history?refresh=1`);
