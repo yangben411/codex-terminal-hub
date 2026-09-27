@@ -2,7 +2,7 @@
 
 A private, mobile-friendly browser interface for your persistent tmux sessions. Use a phone or another computer to check a running CLI, send commands, browse recent output, and manage projects through Tailscale Serve.
 
-[中文完整说明](README.md) · [Configuration](docs/CONFIGURATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md)
+[中文完整说明](README.md) · [Changelog](CHANGELOG.md) · [Configuration](docs/CONFIGURATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md)
 
 **Single user, trusted devices only. There is no application login. Anyone who can reach this service can obtain a shell with the host user's permissions. Keep the listener on loopback and restrict access using your tailnet policy. Never expose it with Tailscale Funnel or a public port.**
 
@@ -11,11 +11,11 @@ A private, mobile-friendly browser interface for your persistent tmux sessions. 
 - Session overview, search, single-session focus and up to four-session multi-view.
 - Create sessions and windows from the browser, with live directory-prefix suggestions.
 - Chinese titles are converted locally into ASCII pinyin identifiers; display labels remain editable without renaming the actual tmux session.
-- A bottom composer that reserves layout space; send text plus Enter, last three inputs per session, and locally saved unsent drafts.
+- A bottom composer that reserves layout space; send text plus Enter, last three inputs per session, and locally saved unsent drafts. Input is locked during a submission, with a 30-second timeout and no automatic resending after failure.
 - Mobile viewport/soft-keyboard handling, direction controls and inertial history scrolling.
 - A frozen xterm history layer with on-demand earlier pages, automatically returning to live output when focus leaves.
 - tmux OSC 52 selection-to-clipboard integration, subject to browser permissions, plus an optional plain-text copy view.
-- One multiplexed WebSocket, render acknowledgements, backpressure, snapshots and visible RTT.
+- One multiplexed WebSocket, render acknowledgements, backpressure and snapshots. Per-session channel RTT is shown only for a confirmed usable terminal connection; disconnected or expired measurements are not displayed.
 - Explicit Reconnect takeover between browsers; session-view retention and idle cleanup without killing tmux.
 
 The interface is currently Chinese. Codex is optional: Shell mode and other terminal programs work too. This is an independent project, not an official OpenAI, Tailscale or tmux product.
