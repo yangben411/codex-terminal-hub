@@ -5,6 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { isBareTerminalProtocolArtifact, isTerminalProtocolReply } from "./terminal-protocol.js";
 import { terminalPlainText } from "./terminal-text.js";
 import { GestureClipboard } from "./gesture-clipboard.js";
+import { InputDelivery } from "./input-delivery.js";
 import "@xterm/xterm/css/xterm.css";
 
 const state = {
@@ -26,8 +27,6 @@ const state = {
   streamAttempt: 0,
   streamTimer: null,
   idleSuspended: false,
-  pendingInputs: new Map(),
-  queuedInput: null,
   inputHistoryIndex: -1,
   inputHistoryDraft: "",
   mobileDpadInputMode: false,
@@ -68,6 +67,26 @@ const elements = Object.fromEntries([
   "sessionLabelDialog", "sessionLabelForm", "sessionLabelInput", "sessionLabelOriginal", "sessionLabelSave",
   "newSessionCwd", "directorySuggestions", "directoryOptions", "directoryStatus",
 ].map((id) => [id, document.getElementById(id)]));
+
+const inputDelivery = new InputDelivery({
+  send: streamSend,
+  onChange(job) {
+    elements.terminalInput.readOnly = Boolean(job);
+    elements.terminalInput.setAttribute("aria-busy", String(Boolean(job)));
+    elements.targetSession.disabled = Boolean(job);
+    elements.sendInputButton.disabled = Boolean(job);
+    elements.sendInputButton.textContent = !job ? "发送 ↵" : job.phase === "queued" ? "等待连接…" : "等待确认…";
+    updateComposerConnection();
+  },
+  onSuccess: completeComposerInput,
+  onFailure(job) {
+    inputFailures.set(job.sessionSlug, true);
+    showToast(job.phase === "sent"
+      ? "发送确认超时，已停止等待，不会自动重发；内容可能已送达，请先检查终端"
+      : "连接超时，本次发送已取消，不会在重连后补发；输入已保留", "error");
+    updateComposerConnection();
+  },
+});
 
 function terminalOptions({ history = false } = {}) {
   return {
@@ -239,12 +258,12 @@ function updateComposerConnection() {
   const slug = state.targetSlug;
   const view = slug && terminalViews.get(slug);
   const label = sessionLabel(getSession(slug));
-  const pending = [...state.pendingInputs.values()].some((item) => item.sessionSlug === slug);
+  const job = inputDelivery.job;
   let status;
   if (!state.clientActive) status = ["offline", "连接未就绪 · 点击重新连接后才能发送"];
-  else if (inputFailures.has(slug)) status = ["error", "发送未确认 · 输入已保留，请检查后重试"];
-  else if (state.queuedInput?.sessionSlug === slug) status = ["waiting", "等待终端连接 · 输入已暂存"];
-  else if (pending) status = ["sending", "正在发送 · 等待终端确认"];
+  else if (inputFailures.has(slug)) status = ["error", "发送已停止 · 输入已保留，请先检查终端"];
+  else if (job?.phase === "queued") status = ["waiting", "等待连接 · 输入栏已锁定，超时后取消"];
+  else if (job) status = ["sending", "等待终端确认 · 输入栏已锁定，请勿重复发送"];
   else if (view?.sessionConnected === false) status = ["offline", "session 已断开 · 等待恢复连接"];
   else if (sessionLatency(view) === "连接无响应") status = ["offline", "连接无响应 · 等待重新确认"];
   else if (sessionLatency(view).endsWith(" ms")) status = ["ready", "已连接 · 可以输入并发送"];
@@ -323,6 +342,7 @@ function presenceLabel(status) {
 }
 
 function showTakeover(status) {
+  inputDelivery.fail();
   state.clientActive = false;
   state.clientStatus = status;
   closeStream(false);
@@ -503,29 +523,33 @@ function handleStreamMessage(message) {
     return;
   }
   if (message.type === "input-ack") {
-    const pending = state.pendingInputs.get(message.inputId);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    state.pendingInputs.delete(message.inputId);
-    inputFailures.delete(pending.sessionSlug);
-    rememberInput(pending.sessionSlug, pending.text);
-    if (state.inputDraftSlug === pending.sessionSlug && elements.terminalInput.value === pending.text) {
-      elements.terminalInput.value = "";
-      resetInputHistoryNavigation();
-      writeInputDraft(pending.sessionSlug, "");
-    } else if (state.inputDraftSlug === pending.sessionSlug) {
-      writeInputDraft(pending.sessionSlug, elements.terminalInput.value);
-    } else {
-      writeInputDraft(pending.sessionSlug, "");
-    }
-    elements.sendInputButton.disabled = false;
-    elements.sendInputButton.textContent = "发送 ↵";
-    const session = getSession(message.session);
-    showToast(`已发送到 ${sessionLabel(session)}`);
-    elements.terminalInput.focus({ preventScroll: true });
-    updateComposerConnection();
+    inputDelivery.ack(message.inputId, message.session);
     return;
   }
+  handleSessionMessage(message);
+}
+
+function completeComposerInput(pending) {
+  inputFailures.delete(pending.sessionSlug);
+  rememberInput(pending.sessionSlug, pending.text);
+  if (state.inputDraftSlug === pending.sessionSlug && elements.terminalInput.value === pending.text) {
+    elements.terminalInput.value = "";
+    resetInputHistoryNavigation();
+    writeInputDraft(pending.sessionSlug, "");
+  } else if (state.inputDraftSlug === pending.sessionSlug) {
+    writeInputDraft(pending.sessionSlug, elements.terminalInput.value);
+  } else if (inputDraftFor(pending.sessionSlug) === pending.text) {
+    writeInputDraft(pending.sessionSlug, "");
+  }
+  const session = getSession(pending.sessionSlug);
+  showToast(`已发送到 ${sessionLabel(session)}`);
+  elements.terminalInput.focus({ preventScroll: true });
+  updateComposerConnection();
+}
+
+function handleSessionMessage(message) {
+  if (["error", "exit"].includes(message.type) && inputDelivery.job
+    && (!message.session || message.session === inputDelivery.job.sessionSlug)) inputDelivery.fail();
   const view = terminalViews.get(message.session);
   if (!view) {
     if (message.type === "error") showToast(message.message || "终端连接错误", "error");
@@ -1615,61 +1639,23 @@ function sendKey(key) {
   if (!streamSend({ type: "input", session: state.targetSlug, data })) showToast("终端正在重连", "error");
 }
 
-function resetComposerSendButton() {
-  elements.sendInputButton.disabled = false;
-  elements.sendInputButton.textContent = "发送 ↵";
-}
-
-function sendComposerText(text, sessionSlug) {
-  const inputId = crypto.randomUUID ? crypto.randomUUID() : `input_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  elements.sendInputButton.disabled = true;
-  elements.sendInputButton.textContent = "发送中…";
-  const sent = streamSend({ type: "input", session: sessionSlug, data: `${text}\r`, inputId });
-  if (!sent) {
-    resetComposerSendButton();
-    state.queuedInput = { text, sessionSlug };
-    showToast("终端正在连接，连接后会自动发送", "error");
-    connectStream();
-    updateComposerConnection();
-    return;
-  }
-  const timer = setTimeout(() => {
-    if (!state.pendingInputs.has(inputId)) return;
-    state.pendingInputs.delete(inputId);
-    inputFailures.set(sessionSlug, true);
-    resetComposerSendButton();
-    showToast("未收到终端确认，输入内容已保留，请重试", "error");
-    updateComposerConnection();
-  }, 5000);
-  state.pendingInputs.set(inputId, { text, sessionSlug, timer });
-  inputFailures.delete(sessionSlug);
-  updateComposerConnection();
-}
-
 function flushQueuedComposerInput(sessionSlug) {
-  const queued = state.queuedInput;
-  if (!queued || queued.sessionSlug !== sessionSlug) return;
   const view = terminalViews.get(sessionSlug);
-  if (!state.streamReady || !view?.inputReady) return;
-  state.queuedInput = null;
-  sendComposerText(queued.text, queued.sessionSlug);
+  inputDelivery.flush(sessionSlug, state.streamReady && view?.serverActive && view.inputReady);
 }
 
 function submitComposerInput() {
+  if (inputDelivery.job) return;
   const text = elements.terminalInput.value;
   if (!text.trim() || !state.targetSlug) return;
   const sessionSlug = state.targetSlug;
   const view = terminalViews.get(sessionSlug);
   if (view) returnToLive(view, { focus: false });
-  if (!state.streamReady || !view?.inputReady) {
-    state.queuedInput = { text, sessionSlug };
-    elements.sendInputButton.disabled = true;
-    elements.sendInputButton.textContent = "连接后发送…";
-    connectStream();
-    updateComposerConnection();
-    return;
-  }
-  sendComposerText(text, sessionSlug);
+  flushInputDraft();
+  inputFailures.delete(sessionSlug);
+  inputDelivery.submit(text, sessionSlug);
+  flushQueuedComposerInput(sessionSlug);
+  if (inputDelivery.job?.phase === "queued") connectStream();
 }
 
 elements.sessionList.addEventListener("click", (event) => {
@@ -1777,6 +1763,7 @@ elements.newWindowForm.addEventListener("submit", async (event) => {
 });
 elements.sendInputButton.addEventListener("click", submitComposerInput);
 elements.terminalInput.addEventListener("keydown", (event) => {
+  if (inputDelivery.job) { event.preventDefault(); event.stopPropagation(); return; }
   // 229 is used by iOS/Android IMEs for punctuation and composition events.
   // It must never suppress the textarea's native input handling. Only avoid
   // submitting Enter while an IME is actively composing.
@@ -1808,6 +1795,7 @@ elements.mobileDpad.addEventListener("click", (event) => {
   if (!button) return;
   const direction = button.dataset.key === "up" ? -1 : button.dataset.key === "down" ? 1 : 0;
   if (state.mobileDpadInputMode && direction) {
+    if (inputDelivery.job) return;
     navigateInputHistory(direction);
     elements.terminalInput.focus({ preventScroll: true });
     state.mobileDpadInputMode = false;
