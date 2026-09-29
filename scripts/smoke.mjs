@@ -73,6 +73,7 @@ try {
   assert.equal(renamed.session.displayName, "工作终端");
   assert.equal(renamed.session.name, session.name);
   const marker = `OUTPUT_${Date.now()}`;
+  await runTmux("copy-mode", "-t", `=${session.name}:`);
   const inputId = `input_${Date.now()}`;
   socket = new WebSocket(`${base.replace(/^http/, "ws")}/api/terminal-stream?clientId=${clientId}`);
   await new Promise((resolve, reject) => {

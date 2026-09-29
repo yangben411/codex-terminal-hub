@@ -52,6 +52,7 @@ try {
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.addInitScript(() => {
+    Object.defineProperty(crypto, "randomUUID", { value: undefined });
     // Emulate the independently shrinking/panning visual viewport of a keyboard.
     const visual = new EventTarget();
     Object.assign(visual, { width: 390, height: 844, offsetTop: 0, offsetLeft: 0, scale: 1 });
@@ -71,11 +72,16 @@ try {
       message(data) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) })); }
       send(raw) {
         const data = JSON.parse(raw);
+        if (data.type === "resize") window.__hubResizeCount = (window.__hubResizeCount || 0) + 1;
         if (data.type === "input") (window.__hubInputs ||= []).push(data.data);
         if (data.type === "subscribe") setTimeout(() => this.message({ type: "snapshot", session: data.session, seq: 1, data: "LIVE\r\n" }), 0);
         if (data.type === "ping") this.message({ type: "pong", clientAt: data.clientAt });
         if (data.type === "session-ping") this.message({ type: "session-pong", session: data.session, clientAt: data.clientAt, connected: true });
-        if (data.type === "input") setTimeout(() => this.message({ type: "input-ack", inputId: data.inputId, session: data.session }), 100);
+        if (data.type === "input") {
+          const ack = () => this.message({ type: "input-ack", inputId: data.inputId, session: data.session });
+          if (window.__hubHoldAck) window.__hubReleaseAck = ack;
+          else setTimeout(ack, 100);
+        }
       }
       close() { this.readyState = 3; }
     }
@@ -112,6 +118,7 @@ try {
   assert.equal(await viewAction(() => [...hubTest.terminalViews.values()][0].historyContent), frozen);
   assert.equal(await viewAction(() => [...hubTest.terminalViews.values()][0].historyActive), false);
   const focusedRequests = historyRequests;
+  const keyboardResizes = await page.evaluate(() => window.__hubResizeCount || 0);
   for (const [width, height, top] of [[390, 280, 100], [320, 300, 0], [390, 410, 50]]) {
     await page.evaluate(([w, h, y]) => mockViewport(w, h, y), [width, height, top]);
     await page.waitForTimeout(250);
@@ -127,16 +134,24 @@ try {
     assert.ok(geometry.terminalBottom <= geometry.composerTop + 1, "input must not overlap the terminal");
   }
   assert.equal(historyRequests, focusedRequests, "keyboard changes must not trigger history requests");
+  assert.equal(await page.evaluate(() => window.__hubResizeCount || 0), keyboardResizes, "keyboard changes must not resize tmux through observers or timers");
   await page.locator("#terminalInput").fill("测试输入");
+  await page.evaluate(() => { window.__hubHoldAck = true; });
   await page.locator("#terminalInput").press("Enter");
-  assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "sending", "show pending terminal acknowledgement");
+  assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "sending", `show pending terminal acknowledgement: ${JSON.stringify({ errors, input: await page.locator("#terminalInput").inputValue(), sent: await page.evaluate(() => window.__hubInputs) })}`);
+  assert.equal(await page.locator("#terminalInput").evaluate(el => el.readOnly), true);
+  await page.evaluate(() => { window.__hubHoldAck = false; window.__hubReleaseAck(); });
   await page.waitForFunction(() => document.querySelector("#terminalInput").value === "");
   assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "return to ready after acknowledgement");
   assert.equal(await page.locator("#terminalInput").evaluate(el => document.activeElement === el), true);
   assert.equal(historyRequests, focusedRequests, "input ACK must not start history loading");
   const punctuation = "，。！？：；‘’“”【】（）<>@#$%&*+-=_/\\";
   await page.locator("#terminalInput").fill(punctuation);
-  await page.locator("#terminalInput").press("Enter");
+  assert.equal(await page.locator("#terminalInput").evaluate(el => {
+    const event = new KeyboardEvent("keydown", {key: "Enter", keyCode: 229, isComposing: true, bubbles: true, cancelable: true});
+    return el.dispatchEvent(event);
+  }), true, "IME composition must not be prevented or submitted");
+  await page.locator("#sendInputButton").tap();
   await page.waitForFunction(() => document.querySelector("#terminalInput").value === "");
   assert.ok(await page.evaluate(expected => window.__hubInputs?.some(value => value === `${expected}\r`), punctuation), "punctuation must reach the terminal unchanged");
 

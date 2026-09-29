@@ -904,6 +904,15 @@ async function handleTerminalSocketMessage(record, raw) {
       ? Buffer.from(`${message.data || ""}`, "base64")
       : `${message.data || ""}`;
     if (!data.length || data.length > 20000) throw new Error("Terminal input is invalid");
+    if (message.inputId) {
+      // Composer text must reach the application, not tmux copy-mode bindings.
+      // Direct terminal keys retain their ordinary tmux behavior.
+      const target = `${exactTarget(subscription.broker.session)}:`;
+      const paneState = await runTmux(["display-message", "-p", "-t", target, "#{pane_id}|#{pane_mode}"]);
+      const [paneId, mode] = paneState.trim().split("|");
+      if (mode === "copy-mode") await runTmux(["send-keys", "-t", paneId, "-X", "cancel"]);
+      else if (mode) throw new Error("终端正在其他交互模式中，请退出后再发送");
+    }
     subscription.broker.write(data);
     sendTerminalMessage(record.socket, {
       type: "input-ack",

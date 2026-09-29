@@ -1,8 +1,15 @@
 // Exactly one composer submission at a time. Once passed to the transport,
 // never automatically resend: a missing ACK does not mean it wasn't executed.
+export function createInputId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  // IDs correlate acknowledgements; they are not authentication credentials.
+  return `input_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${++createInputId.sequence}`;
+}
+createInputId.sequence = 0;
+
 export class InputDelivery {
   constructor({ send, onChange, onSuccess, onFailure, timeoutMs = 30000,
-    setTimer = setTimeout, clearTimer = clearTimeout, createId = () => crypto.randomUUID() }) {
+    setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = id => clearTimeout(id), createId = createInputId }) {
     Object.assign(this, { send, onChange, onSuccess, onFailure, timeoutMs, setTimer, clearTimer, createId });
     this.job = null;
   }

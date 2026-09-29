@@ -1041,6 +1041,9 @@ function ensureTerminalView(session) {
 
 function fitTerminal(view) {
   if (!view.visible || view.panel.hidden || !view.host.clientWidth || !view.host.clientHeight) return;
+  // All fit paths (including ResizeObserver and pending timers) pass here.
+  // The keyboard clips the viewport; it must not resize/reflow the tmux pane.
+  if (state.keyboardOpen || (navigator.maxTouchPoints > 0 && composerHasFocus())) return;
   try {
     view.fit.fit();
     if (view.historyActive) view.historyFit.fit();
@@ -1761,13 +1764,18 @@ elements.newWindowForm.addEventListener("submit", async (event) => {
   } catch (error) { showToast(error.message, "error"); }
   finally { elements.createWindowSubmit.disabled = false; }
 });
+// Keep the textarea focused: dismissing the soft keyboard on pointerdown can
+// move this button before the subsequent click and swallow the tap on Safari.
+elements.sendInputButton.addEventListener("pointerdown", (event) => {
+  if (event.button === 0 && document.activeElement === elements.terminalInput) event.preventDefault();
+});
 elements.sendInputButton.addEventListener("click", submitComposerInput);
 elements.terminalInput.addEventListener("keydown", (event) => {
   if (inputDelivery.job) { event.preventDefault(); event.stopPropagation(); return; }
   // 229 is used by iOS/Android IMEs for punctuation and composition events.
   // It must never suppress the textarea's native input handling. Only avoid
   // submitting Enter while an IME is actively composing.
-  if ((event.isComposing || event.keyCode === 229) && event.key === "Enter") return;
+  if (event.isComposing || event.keyCode === 229) return;
   if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === "ArrowUp") {
     if (navigateInputHistory(-1)) event.preventDefault();
     return;
