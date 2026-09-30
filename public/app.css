@@ -928,31 +928,9 @@ p { margin-top: 0; }
 .composer-row {
   display: grid;
   min-width: 0;
-  grid-template-columns: 150px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   padding: 8px 12px 10px;
-}
-
-.target-picker {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
-  padding: 0 9px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: #171c23;
-}
-
-.target-picker span { color: var(--muted); font-size: 9px; }
-
-.target-picker select {
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--text);
-  font-size: 11px;
 }
 
 .composer textarea,
@@ -1380,7 +1358,6 @@ dialog select { min-height: 42px; padding: 0 11px; }
     padding: 0;
   }
 
-  .target-picker { grid-column: 1 / -1; min-height: 32px; }
 
   .send-button { padding: 0 13px; }
 }
@@ -1497,7 +1474,7 @@ dialog select { min-height: 42px; padding: 0 11px; }
 }
 
 .composer.docked .composer-row {
-  grid-template-columns: 130px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
   padding: 0;
 }
@@ -1535,7 +1512,7 @@ dialog select { min-height: 42px; padding: 0 11px; }
 
   .composer.docked .composer-row {
     grid-auto-flow: column;
-    grid-template-columns: 42px 76px minmax(0, 1fr) auto;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
     gap: 4px;
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   }
@@ -1543,13 +1520,6 @@ dialog select { min-height: 42px; padding: 0 11px; }
   .composer.docked .composer-row > * { min-width: 0; }
   .composer.docked .composer-row textarea { width: 100%; }
 
-  .composer.docked .target-picker {
-    min-height: 40px;
-    grid-column: auto;
-    padding-inline: 7px;
-  }
-
-  .composer.docked .target-picker span { display: none; }
 
   .mobile-direction-toggle {
     display: inline-grid;
@@ -1582,7 +1552,7 @@ dialog select { min-height: 42px; padding: 0 11px; }
 
 @media (max-width: 390px) {
   .composer.docked .composer-row {
-    grid-template-columns: 38px 64px minmax(0, 1fr) auto;
+    grid-template-columns: 38px minmax(0, 1fr) auto;
     gap: 3px;
     padding-inline: 5px;
   }

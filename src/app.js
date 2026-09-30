@@ -58,7 +58,7 @@ const elements = Object.fromEntries([
   "viewTitle", "viewSubtitle", "overviewButton", "multiViewButton", "newWindowButton",
   "openTerminalTab", "overviewView", "terminalView", "emptyView", "sessionCount",
   "sessionGrid", "openSelectedMulti", "multiSelectionHint", "windowStrip", "terminalGrid",
-  "composer", "composerToggle", "composerClose", "quickKeys", "mobileDpad", "composerStatus", "targetSession",
+  "composer", "composerToggle", "composerClose", "quickKeys", "mobileDpad", "composerStatus",
   "terminalInput", "sendInputButton", "mobileDirectionToggle", "newSessionDialog", "newSessionForm", "createSessionSubmit",
   "newWindowDialog", "newWindowForm", "newWindowContext", "createWindowSubmit", "clientTakeover",
   "clientTakeoverEyebrow", "clientTakeoverTitle", "clientTakeoverMessage", "clientPresenceDot",
@@ -73,7 +73,6 @@ const inputDelivery = new InputDelivery({
   onChange(job) {
     elements.terminalInput.readOnly = Boolean(job);
     elements.terminalInput.setAttribute("aria-busy", String(Boolean(job)));
-    elements.targetSession.disabled = Boolean(job);
     elements.sendInputButton.disabled = Boolean(job);
     elements.sendInputButton.textContent = !job ? "发送 ↵" : job.phase === "queued" ? "等待连接…" : "等待确认…";
     updateComposerConnection();
@@ -975,6 +974,9 @@ function ensureTerminalView(session) {
     liveOutputBytes: 0, historyLiveBaseline: 0, inputReady: false,
   };
   terminalViews.set(session.slug, view);
+  for (const eventName of ["pointerdown", "focusin"]) {
+    panel.addEventListener(eventName, () => setInputTarget(view.slug));
+  }
   // Only accept terminal copy requests following interaction with this screen.
   for (const eventName of ["pointerdown", "pointerup", "keydown"]) {
     host.addEventListener(eventName, () => { view.lastClipboardActionAt = Date.now(); }, { capture: true });
@@ -1250,8 +1252,6 @@ function renderTerminal() {
   if (!sessions.length) return showOverview();
   if (!sessions.some((session) => session.slug === state.targetSlug)) setInputTarget(sessions[0].slug);
   else if (state.inputDraftSlug !== state.targetSlug) setInputTarget(state.targetSlug);
-  elements.targetSession.innerHTML = sessions.map((session) => `<option value="${session.slug}">${escapeHtml(sessionLabel(session))}</option>`).join("");
-  elements.targetSession.value = state.targetSlug;
   elements.composer.hidden = false;
   document.querySelector(".main-area").classList.add("terminal-active");
   setComposer(true);
@@ -1587,9 +1587,7 @@ elements.sessionLabelForm.addEventListener("submit", async (event) => {
       const current = getSession(view.slug);
       if (current) view.name.textContent = sessionLabel(current);
     }
-    for (const option of elements.targetSession.options) {
-      option.textContent = sessionLabel(getSession(option.value));
-    }
+    updateComposerConnection();
     const visible = visibleSessions();
     if (visible.length === 1) elements.viewTitle.textContent = sessionLabel(visible[0]);
     elements.sessionLabelDialog.close();
@@ -1811,9 +1809,6 @@ elements.mobileDpad.addEventListener("click", (event) => {
   }
   state.mobileDpadInputMode = false;
   sendKey(button.dataset.key);
-});
-elements.targetSession.addEventListener("change", () => {
-  setInputTarget(elements.targetSession.value);
 });
 elements.composerToggle.addEventListener("click", () => setComposer(true));
 elements.composerClose.addEventListener("click", () => setComposer(false));

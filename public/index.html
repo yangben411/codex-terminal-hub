@@ -10,7 +10,7 @@
     <title>Codex Terminal Hub</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/terminal-icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css?v=20260924-history-wait" />
+    <link rel="stylesheet" href="/app.css?v=20260930-composer" />
     <link rel="stylesheet" href="/terminal.css?v=0.3.0" />
   </head>
   <body>
@@ -138,10 +138,6 @@
             </div>
             <div class="composer-row">
               <button class="mobile-direction-toggle" id="mobileDirectionToggle" type="button" aria-expanded="false">方向</button>
-              <label class="target-picker">
-                <span>发送到</span>
-                <select id="targetSession"></select>
-              </label>
           <textarea id="terminalInput" rows="1" inputmode="text" enterkeyhint="send" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="输入会自动保存；↑↓ 切换最近 3 条输入"></textarea>
               <button class="send-button" id="sendInputButton" type="button" aria-label="发送并回车">发送 ↵</button>
             </div>
@@ -283,6 +279,6 @@
       </form>
     </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/terminal.js?v=20260929-mobile-input" type="module"></script>
+    <script src="/terminal.js?v=20260930-composer" type="module"></script>
   </body>
 </html>
