@@ -10,7 +10,7 @@
     <title>Codex Terminal Hub</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/terminal-icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css?v=20260930-composer" />
+    <link rel="stylesheet" href="/app.css?v=20261001-composer" />
     <link rel="stylesheet" href="/terminal.css?v=0.3.0" />
   </head>
   <body>
@@ -125,7 +125,7 @@
             <button data-key="ctrl-l">Ctrl-L</button>
           </div>
           <div class="mobile-control-deck">
-            <div class="composer-connection" id="composerStatus" data-state="offline" role="status" aria-live="polite">终端未连接</div>
+            <div class="composer-connection" id="composerStatus" data-state="offline" role="status" aria-live="polite"><span class="composer-session-name"></span><span class="composer-state-label">终端未连接</span></div>
             <div class="mobile-dpad" id="mobileDpad" role="group" aria-label="移动端方向键">
               <button class="dpad-up" data-key="up" aria-label="向上">↑</button>
               <button class="dpad-left" data-key="left" aria-label="向左">←</button>
@@ -178,6 +178,7 @@
         <div class="directory-picker">
           <label for="newSessionCwd">
             <span>工作目录</span>
+            <small>目录不存在时，点击创建会自动新建；相对路径以默认工作目录为起点。</small>
             <input id="newSessionCwd" name="cwd" required placeholder="/Users/…/项目目录" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="directoryOptions" />
           </label>
           <div id="directorySuggestions" hidden>
@@ -279,6 +280,6 @@
       </form>
     </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/terminal.js?v=20260930-composer" type="module"></script>
+    <script src="/terminal.js?v=20261001-composer" type="module"></script>
   </body>
 </html>

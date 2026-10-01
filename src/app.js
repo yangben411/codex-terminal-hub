@@ -269,7 +269,8 @@ function updateComposerConnection() {
   else if (state.streamTimer || [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.stream?.readyState)) status = ["connecting", "正在连接终端 · 发送内容会暂存"];
   else status = ["offline", "终端未连接 · 输入会暂存，连接后发送"];
   elements.composerStatus.dataset.state = status[0];
-  elements.composerStatus.textContent = `${label ? `${label} · ` : ""}${status[1]}`;
+  elements.composerStatus.querySelector(".composer-session-name").textContent = label ? `${label} · ` : "";
+  elements.composerStatus.querySelector(".composer-state-label").textContent = status[1];
 }
 
 function activeWindow(session) {

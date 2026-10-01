@@ -90,6 +90,7 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}/?session=${session.slug}`);
   await page.waitForFunction(() => [...window.hubTest?.terminalViews.values() || []].some(view => view.inputReady && view.historyReady));
   assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "input-ready only after terminal snapshot");
+  assert.equal(await page.locator(".composer-session-name").isVisible(), false, "mobile status omits session name");
   const viewAction = async action => page.evaluate(action);
   await viewAction(async () => { await hubTest.openHistoryCache([...hubTest.terminalViews.values()][0]); });
   await page.waitForTimeout(250);
@@ -186,6 +187,7 @@ try {
     composerTop: document.querySelector("#composer").getBoundingClientRect().top,
   }));
   assert.ok(desktop.inputBottom <= 450 && desktop.terminalBottom <= desktop.composerTop + 1, JSON.stringify(desktop));
+  assert.equal(await page.locator(".composer-session-name").isVisible(), true, "desktop retains the target name");
   assert.deepEqual(errors, []);
   console.log("Mobile regression passed: gesture-only pagination, stale response discard, keyboard viewport containment, no overlap, input ACK, cancelled touch momentum, desktop layout.");
 } finally {

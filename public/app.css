@@ -1211,6 +1211,7 @@ dialog select { min-height: 42px; padding: 0 11px; }
 [hidden] { display: none !important; }
 
 @media (max-width: 900px) {
+  .composer-session-name { display: none; }
   :root { --sidebar-width: 0px; }
 
   .app-shell { grid-template-columns: 1fr; }

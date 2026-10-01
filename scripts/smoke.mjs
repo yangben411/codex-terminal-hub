@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,6 +67,17 @@ try {
   const { session } = await request("/api/sessions", { name: "测试", cwd: directory, startup: "shell" });
   assert.equal(session.name, "ce-shi");
   assert.equal(session.displayName, "测试");
+  const createdPath = path.join(directory, "新项目", "子目录");
+  await assert.rejects(stat(createdPath), { code: "ENOENT" });
+  const autoCreated = await request("/api/sessions", { name: "auto_directory", cwd: "新项目/子目录", startup: "shell" });
+  assert.ok((await stat(createdPath)).isDirectory());
+  const actualCwd = await runTmux("display-message", "-p", "-t", `=${autoCreated.session.name}:`, "#{pane_current_path}");
+  assert.equal(await realpath(actualCwd.stdout.trim()), await realpath(createdPath));
+  const occupied = await fetch(`${base}/api/sessions`, {
+    method: "POST", headers, body: JSON.stringify({ name: "file_path", cwd: path.join(root, "package.json"), startup: "shell" }),
+  });
+  assert.equal(occupied.ok, false);
+  assert.match((await occupied.json()).error, /文件占用/);
   const duplicate = await request("/api/sessions", { name: "测试", cwd: directory, startup: "shell" });
   assert.equal(duplicate.session.name, "ce-shi-2");
   const renamed = await request(`/api/sessions/${session.slug}/display-name`, { displayName: "工作终端" });

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, stat } from "node:fs/promises";
+import { access, stat, mkdir } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -548,10 +548,21 @@ async function ensureTerminalBroker(session, cols = 100, rows = 30) {
   }
 }
 
-async function validateDirectory(value) {
+async function validateDirectory(value, { create = false } = {}) {
   const directory = resolveDirectoryInput(value || "", defaultCwd);
-  const metadata = await stat(directory);
-  if (!metadata.isDirectory()) throw new Error("Working directory is not a directory");
+  let metadata;
+  try {
+    metadata = await stat(directory);
+  } catch (error) {
+    if (!create || error.code !== "ENOENT") throw error;
+    try {
+      await mkdir(directory, { recursive: true });
+      metadata = await stat(directory);
+    } catch (creationError) {
+      throw new Error(`无法创建工作目录：${creationError.message}`);
+    }
+  }
+  if (!metadata.isDirectory()) throw new Error("工作目录路径已被文件占用，请选择其他路径");
   await access(directory);
   return directory;
 }
@@ -591,7 +602,6 @@ async function createSession(payload) {
   validatePreset(payload.startup || "codex");
   const { name: generatedName, displayName } = createSessionNames(payload.name, new Set((await listSessions()).map(session => session.name)));
   const name = validateSessionName(generatedName);
-  const cwd = await validateDirectory(payload.cwd);
   const windowName = validateWindowName(payload.windowName || "codex");
   const existing = (await listSessions()).some((session) => session.name === name);
   if (existing) {
@@ -600,6 +610,7 @@ async function createSession(payload) {
     throw error;
   }
 
+  const cwd = await validateDirectory(payload.cwd, { create: true });
   await runTmux(["new-session", "-d", "-s", name, "-c", cwd, "-n", windowName]);
   if (displayName) {
     await runTmux(["set-option", "-t", `${exactTarget(name)}:`, "@codex_web_display_name", displayName]);
