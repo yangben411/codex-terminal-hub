@@ -135,6 +135,13 @@ try {
     assert.ok(geometry.terminalBottom <= geometry.composerTop + 1, "input must not overlap the terminal");
   }
   assert.equal(historyRequests, focusedRequests, "keyboard changes must not trigger history requests");
+  // A browser may pan the layout after its last visualViewport event.
+  await page.evaluate(() => { document.body.style.marginTop = "80px"; });
+  await page.waitForTimeout(150);
+  const inputWithinKeyboard = await page.locator("#terminalInput").evaluate(el => el.getBoundingClientRect().bottom <= visualViewport.offsetTop + visualViewport.height + 1);
+  assert.equal(inputWithinKeyboard, true, "late keyboard pan must not cover the input");
+  await page.evaluate(() => { document.body.style.marginTop = "0px"; });
+  await page.waitForTimeout(150);
   assert.equal(await page.evaluate(() => window.__hubResizeCount || 0), keyboardResizes, "keyboard changes must not resize tmux through observers or timers");
   await page.locator("#terminalInput").fill("测试输入");
   await page.evaluate(() => { window.__hubHoldAck = true; });
@@ -148,6 +155,15 @@ try {
   assert.equal(historyRequests, focusedRequests, "input ACK must not start history loading");
   const punctuation = "，。！？：；‘’“”【】（）<>@#$%&*+-=_/\\";
   await page.locator("#terminalInput").fill(punctuation);
+  const sentBeforeComposition = await page.evaluate(() => window.__hubInputs.length);
+  await page.locator("#terminalInput").evaluate(el => {
+    el.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    el.dispatchEvent(new CompositionEvent("compositionend", { data: "，", bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  });
+  assert.equal(await page.evaluate(() => window.__hubInputs.length), sentBeforeComposition, "IME confirmation must not send or lock input");
+  assert.equal(await page.locator("#terminalInput").evaluate(el => el.readOnly), false);
   assert.equal(await page.locator("#terminalInput").evaluate(el => {
     const event = new KeyboardEvent("keydown", {key: "Enter", keyCode: 229, isComposing: true, bubbles: true, cancelable: true});
     return el.dispatchEvent(event);

@@ -35,6 +35,8 @@ const state = {
   viewportWidth: null,
   viewportHeight: null,
   keyboardOpen: false,
+  inputComposing: false,
+  inputCompositionEndedAt: -Infinity,
 };
 
 const terminalViews = new Map();
@@ -1056,6 +1058,40 @@ function fitTerminal(view) {
 
 let viewportFitTimer = null;
 let composerFitTimer = null;
+let keyboardViewportFrame = null;
+
+function followKeyboardViewport() {
+  if (keyboardViewportFrame !== null) cancelAnimationFrame(keyboardViewportFrame);
+  let lastGeometry = "";
+  let blurredAt = null;
+  const tick = () => {
+    const focused = document.activeElement === elements.terminalInput;
+    if (focused) blurredAt = null;
+    else blurredAt ??= performance.now();
+    const viewport = window.visualViewport;
+    const geometry = [viewport?.width, viewport?.height, viewport?.offsetTop, viewport?.offsetLeft, window.innerHeight].join(":");
+    if (geometry !== lastGeometry) {
+      lastGeometry = geometry;
+      syncVisualViewport();
+    }
+    // Safari can pan a focused input after its viewport event. Correct using
+    // the actual rendered bottom, including any previous correction, so the
+    // entire app follows the keyboard without moving the terminal's cursor.
+    const root = document.documentElement;
+    const previousShift = Number.parseFloat(root.style.getPropertyValue("--app-keyboard-shift")) || 0;
+    const bottom = (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight);
+    const rect = elements.composer.getBoundingClientRect();
+    const shift = !elements.composer.hidden && rect.height > 0
+      ? Math.max(0, rect.bottom + previousShift - bottom) : 0;
+    if (Math.abs(shift - previousShift) > 1) root.style.setProperty("--app-keyboard-shift", `${shift}px`);
+    if (!focused && performance.now() - blurredAt > 800) {
+      keyboardViewportFrame = null;
+      return;
+    }
+    keyboardViewportFrame = requestAnimationFrame(tick);
+  };
+  keyboardViewportFrame = requestAnimationFrame(tick);
+}
 
 function refitVisibleTerminals() {
   for (const view of terminalViews.values()) if (view.visible) fitTerminal(view);
@@ -1084,6 +1120,7 @@ function syncVisualViewport() {
     state.viewportWidth = measuredWidth;
   }
   state.keyboardOpen = keyboardOpening || (state.keyboardOpen && !keyboardClosing);
+  if (!state.keyboardOpen && !composerHasFocus()) document.documentElement.style.removeProperty("--app-keyboard-shift");
   state.viewportHeight = height;
   document.documentElement.style.setProperty("--app-viewport-width", `${state.viewportWidth}px`);
   document.documentElement.style.setProperty("--app-viewport-height", `${height}px`);
@@ -1766,15 +1803,23 @@ elements.newWindowForm.addEventListener("submit", async (event) => {
 // Keep the textarea focused: dismissing the soft keyboard on pointerdown can
 // move this button before the subsequent click and swallow the tap on Safari.
 elements.sendInputButton.addEventListener("pointerdown", (event) => {
-  if (event.button === 0 && document.activeElement === elements.terminalInput) event.preventDefault();
+  if (event.button === 0 && !state.inputComposing && document.activeElement === elements.terminalInput) event.preventDefault();
 });
 elements.sendInputButton.addEventListener("click", submitComposerInput);
+elements.terminalInput.addEventListener("compositionstart", () => { state.inputComposing = true; });
+elements.terminalInput.addEventListener("compositionend", () => {
+  state.inputComposing = false;
+  state.inputCompositionEndedAt = performance.now();
+});
 elements.terminalInput.addEventListener("keydown", (event) => {
   if (inputDelivery.job) { event.preventDefault(); event.stopPropagation(); return; }
   // 229 is used by iOS/Android IMEs for punctuation and composition events.
   // It must never suppress the textarea's native input handling. Only avoid
   // submitting Enter while an IME is actively composing.
-  if (event.isComposing || event.keyCode === 229) return;
+  if (state.inputComposing || event.isComposing || event.keyCode === 229) return;
+  // Some Chinese IMEs emit compositionend BEFORE the Enter used to commit
+  // punctuation/candidates. That Enter belongs to the IME, not Send.
+  if (event.key === "Enter" && performance.now() - state.inputCompositionEndedAt < 250) return;
   if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === "ArrowUp") {
     if (navigateInputHistory(-1)) event.preventDefault();
     return;
@@ -1877,6 +1922,7 @@ document.addEventListener("focusin", (event) => {
 elements.terminalInput.addEventListener("focus", () => {
   returnVisibleHistoryToLive();
   syncVisualViewport();
+  if (navigator.maxTouchPoints > 0) followKeyboardViewport();
 });
 
 for (const name of ["pointerdown", "keydown", "touchstart"]) {
