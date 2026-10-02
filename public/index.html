@@ -10,7 +10,7 @@
     <title>Codex Terminal Hub</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/terminal-icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css?v=20261001-composer" />
+    <link rel="stylesheet" href="/app.css?v=20261002-shift-left" />
     <link rel="stylesheet" href="/terminal.css?v=0.3.0" />
   </head>
   <body>
@@ -127,6 +127,7 @@
           <div class="mobile-control-deck">
             <div class="composer-connection" id="composerStatus" data-state="offline" role="status" aria-live="polite"><span class="composer-session-name"></span><span class="composer-state-label">终端未连接</span></div>
             <div class="mobile-dpad" id="mobileDpad" role="group" aria-label="移动端方向键">
+              <button class="dpad-shift-left" data-key="shift-left" aria-label="Shift 加左方向键" title="发送 Shift+← 到当前终端"><small>Shift</small><span>←</span></button>
               <button class="dpad-up" data-key="up" aria-label="向上">↑</button>
               <button class="dpad-left" data-key="left" aria-label="向左">←</button>
               <button class="dpad-enter" data-key="enter" aria-label="确认">
@@ -280,6 +281,6 @@
       </form>
     </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/terminal.js?v=20261001-composer" type="module"></script>
+    <script src="/terminal.js?v=20261002-shift-left" type="module"></script>
   </body>
 </html>

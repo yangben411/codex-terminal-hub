@@ -1635,7 +1635,7 @@ function disposeTerminalView(view) {
 }
 
 function sendKey(key) {
-  const codes = { escape: "\x1b", tab: "\t", enter: "\r", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", "ctrl-c": "\x03", "ctrl-l": "\x0c" };
+  const codes = { escape: "\x1b", tab: "\t", enter: "\r", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", "shift-left": "\x1b[1;2D", "ctrl-c": "\x03", "ctrl-l": "\x0c" };
   const data = codes[key];
   if (!data || !state.targetSlug) return;
   if (!streamSend({ type: "input", session: state.targetSlug, data })) showToast("终端正在重连", "error");

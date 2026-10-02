@@ -1335,6 +1335,8 @@ dialog select { min-height: 42px; padding: 0 11px; }
   }
 
   .dpad-up { grid-area: 1 / 2; }
+  .dpad-shift-left { grid-area: 1 / 1; }
+  .dpad-shift-left small { font-size: 9px; line-height: 12px; }
   .dpad-left { grid-area: 2 / 1; }
   .dpad-enter { grid-area: 2 / 2; }
   .dpad-right { grid-area: 2 / 3; }
