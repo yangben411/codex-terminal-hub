@@ -52,6 +52,12 @@ try {
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { value: {
+      async writeText(text) {
+        if (window.__denyCopy) throw new Error("denied");
+        window.__copiedText = text;
+      },
+    } });
     Object.defineProperty(crypto, "randomUUID", { value: undefined });
     // Emulate the independently shrinking/panning visual viewport of a keyboard.
     const visual = new EventTarget();
@@ -91,9 +97,22 @@ try {
   await page.waitForFunction(() => [...window.hubTest?.terminalViews.values() || []].some(view => view.inputReady && view.historyReady));
   assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "input-ready only after terminal snapshot");
   assert.equal(await page.locator(".composer-session-name").isVisible(), false, "mobile status omits session name");
+  await page.locator("#openCopyText").tap();
+  assert.match(await page.evaluate(() => window.__copiedText), /LIVE/);
+  assert.equal(await page.locator("#copyTextDialog").evaluate(el => el.open), false, "successful mobile copy needs no dialog");
   const viewAction = async action => page.evaluate(action);
   await viewAction(async () => { await hubTest.openHistoryCache([...hubTest.terminalViews.values()][0]); });
   await page.waitForTimeout(250);
+
+  await page.locator("#openCopyText").tap();
+  assert.match(await page.evaluate(() => window.__copiedText), /历史第/);
+  assert.equal(await page.evaluate(() => [...hubTest.terminalViews.values()][0].historyActive), true, "copy must preserve the viewed history screen");
+  await page.evaluate(() => { window.__denyCopy = true; });
+  await page.locator("#openCopyText").tap();
+  await page.locator("#copyTextContent").waitFor({ state: "visible" });
+  assert.match(await page.locator("#copyTextContent").inputValue(), /历史第/);
+  await page.locator('#copyTextDialog button[value="close"]').click();
+  await page.evaluate(() => { window.__denyCopy = false; });
 
   // A programmatic xterm scroll/resize is not a user request for another page.
   const initialPages = earlierRequests;

@@ -1396,12 +1396,12 @@ function updateCopyText() {
   elements.copyTextFeedback.textContent = "长按文字选择并复制，也可以一键复制全部。";
 }
 
-function openCopyText(slug = state.targetSlug || state.activeSlug) {
+function openCopyText(slug = state.targetSlug || state.activeSlug, snapshot = null) {
   const view = terminalViews.get(slug);
   if (!view?.visible) return showToast("请先打开一个 session", "error");
   if (view.historyOpening) return showToast("缓存正在加载，请稍后复制", "error");
   const terminal = view.historyActive ? view.historyTerm : view.term;
-  copyTextSnapshot = {
+  copyTextSnapshot = snapshot || {
     screen: terminalPlainText(terminal),
     loaded: terminalPlainText(terminal, { viewportOnly: false }),
   };
@@ -1439,7 +1439,29 @@ document.addEventListener("pointerup", (event) => {
 }, { capture: true });
 document.addEventListener("pointercancel", () => { tmuxCopyGesture = null; });
 
-elements.openCopyText.addEventListener("click", () => openCopyText());
+elements.openCopyText.addEventListener("click", async () => {
+  if (!window.matchMedia("(max-width: 900px)").matches) return openCopyText();
+  const slug = state.targetSlug || state.activeSlug;
+  const view = terminalViews.get(slug);
+  if (!view?.visible) return showToast("请先打开一个 session", "error");
+  if (view.historyOpening) return showToast("缓存正在加载，请稍后复制", "error");
+  const terminal = view.historyActive ? view.historyTerm : view.term;
+  const snapshot = {
+    screen: terminalPlainText(terminal),
+    loaded: terminalPlainText(terminal, { viewportOnly: false }),
+  };
+  if (!snapshot.screen.trim()) return showToast("当前屏幕没有可复制的文字");
+  // Start clipboard access directly in the tap gesture, with locally available
+  // rendered text. No server round trip or mouse-only selection is required.
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+    await navigator.clipboard.writeText(snapshot.screen);
+    showToast("当前屏幕文字已复制");
+  } catch {
+    openCopyText(slug, snapshot);
+    elements.copyTextFeedback.textContent = "浏览器未允许直接复制，请长按下方文字选择并复制。";
+  }
+});
 elements.copyTextScope.addEventListener("change", updateCopyText);
 elements.selectCopyText.addEventListener("click", () => {
   elements.copyTextContent.focus();
