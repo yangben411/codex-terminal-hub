@@ -77,6 +77,8 @@ For Linux, edit the absolute paths in [examples/codex-terminal-hub.service](exam
 
 ## Development
 
+See the [Tailscale deployment and tuning guide (Chinese)](docs/TAILSCALE.md) for a sanitized local configuration record, startup checks, Safari/proxy troubleshooting, and direct/relay connectivity guidance.
+
 ```sh
 npm run check
 npm test

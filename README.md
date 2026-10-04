@@ -87,6 +87,8 @@ macOS App 版如果没有 `tailscale` 命令，可用：
 
 此地址只向有权限的 tailnet 设备提供服务，不是公开分享链接。原理和权限要求见 [Tailscale Serve 官方说明](https://tailscale.com/docs/features/tailscale-serve)及 [Serve 命令参考](https://tailscale.com/docs/reference/tailscale-cli/serve)。使用 HTTPS 也有助于满足浏览器剪贴板 API 的安全上下文要求。
 
+完整的本机配置记录、重启恢复、Safari/Clash 排障和直连/中继优化见 [Tailscale 部署与优化](docs/TAILSCALE.md)。配置记录已脱敏；可选建议与已验证配置分开标注。
+
 ### 4. 可选：Codex
 
 按 [Codex CLI 官方安装与登录说明](https://developers.openai.com/codex/cli/)在服务端安装、运行 `codex` 并完成登录。安装后重新运行 `npm run doctor`，必要时在 `.env` 中指定 `CODEX_PATH`。
