@@ -1,6 +1,6 @@
 # Codex Terminal Hub
 
-把电脑上持续运行的 tmux 会话，变成手机和桌面浏览器都能操作的私人终端。
+把电脑上持续运行的 tmux 会话，变成手机和桌面浏览器都能操作的私人终端，通过 [Tailscale](https://tailscale.com/) 实现私有远程访问。
 
 [English](README.en.md) · [更新日志](CHANGELOG.md) · [配置](docs/CONFIGURATION.md) · [架构与缓存](docs/ARCHITECTURE.md) · [常见问题](docs/TROUBLESHOOTING.md) · [安全边界](SECURITY.md)
 

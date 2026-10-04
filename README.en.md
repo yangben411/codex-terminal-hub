@@ -1,6 +1,6 @@
 # Codex Terminal Hub
 
-A private, mobile-friendly browser interface for your persistent tmux sessions. Use a phone or another computer to check a running CLI, send commands, browse recent output, and manage projects through Tailscale Serve.
+A private, mobile-friendly browser interface for your persistent tmux sessions. Use a phone or another computer to check a running CLI, send commands, browse recent output, and manage projects through [Tailscale](https://tailscale.com/) Serve.
 
 [中文完整说明](README.md) · [Changelog](CHANGELOG.md) · [Configuration](docs/CONFIGURATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md)
 
