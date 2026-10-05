@@ -105,7 +105,7 @@ function terminalOptions({ history = false } = {}) {
     lineHeight: 1.15,
     scrollback: history ? 3000 : 300,
     scrollOnUserInput: true,
-    smoothScrollDuration: 140,
+    smoothScrollDuration: history ? 0 : 140,
     theme: terminalTheme,
   };
 }
@@ -713,33 +713,53 @@ async function loadEarlierHistory(view) {
       view.historyNextBefore = null;
       return;
     }
-    const distanceFromBottom = Math.max(
-      0,
-      view.historyTerm.buffer.active.baseY - view.historyTerm.buffer.active.viewportY,
-    );
     const needsSeparator = view.historyContent && page.content
       && !page.content.endsWith("\n") && !view.historyContent.startsWith("\n");
-    view.historyContent = `${page.content}${needsSeparator ? "\r\n" : ""}${view.historyContent || ""}`;
+    const content = `${page.content}${needsSeparator ? "\r\n" : ""}${view.historyContent || ""}`;
+    // Never reset the visible terminal. Parse the larger page offscreen, while
+    // the reader can keep scrolling the old one, then swap at its latest position.
+    const stagingHost = document.createElement("div");
+    stagingHost.style.cssText = "position:absolute;inset:0;visibility:hidden;pointer-events:none";
+    view.historyHost.append(stagingHost);
+    const nextTerm = new Terminal({ ...terminalOptions({ history: true }), cols: view.historyTerm.cols, rows: view.historyTerm.rows });
+    const nextFit = new FitAddon();
+    const nextSearch = new SearchAddon();
+    nextTerm.loadAddon(nextFit);
+    nextTerm.loadAddon(nextSearch);
+    nextTerm.open(stagingHost);
+    let installed = false;
+    try {
+      ensureHistoryScrollback({ historyTerm: nextTerm }, content);
+      await new Promise(resolve => nextTerm.write(content, resolve));
+      if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus()) return;
+      const oldTerm = view.historyTerm;
+      const top = oldTerm.buffer.active.viewportY;
+      const addedRows = nextTerm.buffer.active.length - oldTerm.buffer.active.length;
+      nextTerm.scrollToLine(Math.max(0, top + addedRows));
+      view.historyTerm = nextTerm;
+      view.historyFit = nextFit;
+      view.historySearch = nextSearch;
+      view.historyContent = content;
+      nextTerm.onScroll(() => updateTerminalStatus(view));
+      const oldHost = view.historyRenderHost;
+      oldTerm.dispose();
+      oldHost?.remove();
+      view.historyRenderHost = stagingHost;
+      stagingHost.style.cssText = "position:absolute;inset:0";
+      installed = true;
+    } finally {
+      if (!installed) { nextTerm.dispose(); stagingHost.remove(); }
+    }
     view.historyNextBefore = page.nextBefore ?? null;
     view.historyHasEarlier = Boolean(page.hasEarlier && page.nextBefore !== null);
     pageAdvanced = view.historyNextBefore !== null && view.historyNextBefore > before;
     view.historyError = null;
-    await new Promise((resolve) => {
-      ensureHistoryScrollback(view, view.historyContent);
-      view.historyTerm.reset();
-      view.historyTerm.write(view.historyContent, () => {
-        if (view.historyActive && view.historyGeneration === generation) {
-          view.historyTerm.scrollToBottom();
-          if (distanceFromBottom) view.historyTerm.scrollLines(-distanceFromBottom);
-        }
-        resolve();
-      });
-    });
   } catch (error) {
     view.historyError = error.message || `${error}`;
     showToast(`历史缓存加载失败：${view.historyError}`, "error");
   } finally {
     view.historyLoadingEarlier = false;
+    if (view.historyActive && view.historyGeneration === generation) fitTerminal(view);
     updateTerminalStatus(view);
     // Continue a gesture-initiated read if a short page still leaves us near
     // the boundary. Do not chain failed requests or a stale reading session.
@@ -825,6 +845,13 @@ function requestEarlierHistory(view) {
 function installTouchScroller(view, host, getTerminal, { openHistoryOnUp = false } = {}) {
   let gesture = null;
   let momentum = 0;
+  const cancelPositionRestore = () => {
+    if (view.historyPositionFrame) cancelAnimationFrame(view.historyPositionFrame);
+    view.historyPositionFrame = null;
+  };
+  for (const name of ["wheel", "pointerdown", "keydown", "touchmove"]) {
+    host.addEventListener(name, cancelPositionRestore, { capture: true, passive: true });
+  }
   const stopMomentum = () => {
     if (momentum) cancelAnimationFrame(momentum);
     momentum = 0;
@@ -880,6 +907,7 @@ function installTouchScroller(view, host, getTerminal, { openHistoryOnUp = false
       }
       const terminal = getTerminal();
       const cellHeight = Math.max(12, host.clientHeight / Math.max(1, terminal.rows));
+      cancelPositionRestore();
       terminal.scrollLines(Math.round((-velocity * 16) / cellHeight) || (velocity > 0 ? -1 : 1));
       if (velocity > 0) requestEarlierHistory(view);
       momentum = requestAnimationFrame(step);
@@ -1020,7 +1048,7 @@ function ensureTerminalView(session) {
   });
   panel.querySelector(".terminal-search").addEventListener("click", () => {
     const needle = prompt("查找当前终端缓存中的文字：");
-    if (needle) (view.historyActive ? historySearch : search).findNext(needle, {
+    if (needle) (view.historyActive ? view.historySearch : search).findNext(needle, {
       incremental: true,
       decorations: { matchBackground: "#705d19", activeMatchBackground: "#4a8067" },
     });
@@ -1038,20 +1066,72 @@ function ensureTerminalView(session) {
   resizeObserver.observe(host);
   resizeObserver.observe(historyHost);
   view.resizeObserver = resizeObserver;
-  installTouchScroller(view, host, () => view.historyActive ? historyTerm : term, { openHistoryOnUp: true });
-  installTouchScroller(view, historyHost, () => historyTerm);
+  installTouchScroller(view, host, () => view.historyActive ? view.historyTerm : term, { openHistoryOnUp: true });
+  installTouchScroller(view, historyHost, () => view.historyTerm);
   loadHistoryCache(view, { refresh: true });
   return view;
+}
+
+function mobileSessionInputFocused() {
+  return navigator.maxTouchPoints > 0 && (composerHasFocus()
+    || document.activeElement?.matches(".xterm-host textarea"));
+}
+
+function syncTerminalBottom(view) {
+  const terminal = view.term.element;
+  const screen = terminal?.querySelector(".xterm-screen");
+  if (!terminal || !screen || !view.visible) return;
+  const padding = getComputedStyle(view.host);
+  const available = Math.max(0, view.host.clientHeight
+    - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom));
+  const screenHeight = screen.offsetHeight;
+  const lift = (state.keyboardOpen || mobileSessionInputFocused())
+    ? Math.max(0, screenHeight - available) : 0;
+  // Preserve the PTY's rows/columns, but clip the TOP of its rendered screen.
+  // Moving the xterm root also keeps its cursor, IME textarea and hit targets
+  // in the same coordinate system. The composer retains its own grid row.
+  terminal.style.height = lift ? `${screenHeight}px` : "";
+  terminal.style.transform = lift ? `translateY(-${lift}px)` : "";
 }
 
 function fitTerminal(view) {
   if (!view.visible || view.panel.hidden || !view.host.clientWidth || !view.host.clientHeight) return;
   // All fit paths (including ResizeObserver and pending timers) pass here.
   // The keyboard clips the viewport; it must not resize/reflow the tmux pane.
-  if (state.keyboardOpen || (navigator.maxTouchPoints > 0 && composerHasFocus())) return;
+  if (state.keyboardOpen || mobileSessionInputFocused()) {
+    syncTerminalBottom(view);
+    return;
+  }
   try {
+    syncTerminalBottom(view);
     view.fit.fit();
-    if (view.historyActive) view.historyFit.fit();
+    if (view.historyActive && !view.historyLoadingEarlier) {
+      const terminal = view.historyTerm;
+      // Anchor the logical line, not distance from the changing bottom. Reflow
+      // can change wrapped row counts when Safari's viewport changes size.
+      const buffer = terminal.buffer.active;
+      let logicalLine = 0, wrappedRow = 0;
+      for (let i = 1; i <= buffer.viewportY; i++) {
+        if (buffer.getLine(i)?.isWrapped) wrappedRow++;
+        else { logicalLine++; wrappedRow = 0; }
+      }
+      view.historyFit.fit();
+      let row = 0, logical = 0;
+      while (row + 1 < buffer.length && logical < logicalLine) {
+        row++;
+        if (!buffer.getLine(row)?.isWrapped) logical++;
+      }
+      while (wrappedRow-- > 0 && buffer.getLine(row + 1)?.isWrapped) row++;
+      terminal.scrollToLine(row);
+      // xterm synchronizes its DOM viewport on the next frame after resize;
+      // restore after that pass too, otherwise the old scrollTop wins.
+      if (view.historyPositionFrame) cancelAnimationFrame(view.historyPositionFrame);
+      const generation = view.historyGeneration;
+      view.historyPositionFrame = requestAnimationFrame(() => {
+        view.historyPositionFrame = null;
+        if (view.historyActive && view.historyGeneration === generation && view.historyTerm === terminal) terminal.scrollToLine(row);
+      });
+    }
     if (view.serverActive) streamSend({ type: "resize", session: view.slug, cols: view.term.cols, rows: view.term.rows });
   } catch {}
 }
@@ -1099,6 +1179,9 @@ function refitVisibleTerminals() {
 
 function syncComposerLayout({ fit = true } = {}) {
   // CSS grid reserves input space synchronously; only the terminals need refit.
+  requestAnimationFrame(() => {
+    for (const view of terminalViews.values()) syncTerminalBottom(view);
+  });
   if (!fit) return;
   requestAnimationFrame(refitVisibleTerminals);
   clearTimeout(composerFitTimer);
@@ -1940,6 +2023,7 @@ document.addEventListener("pointerdown", (event) => {
 }, { capture: true });
 document.addEventListener("focusin", (event) => {
   if (!isInsideSessionScreen(event.target)) returnVisibleHistoryToLive();
+  if (mobileSessionInputFocused()) syncComposerLayout({ fit: false });
 });
 elements.terminalInput.addEventListener("focus", () => {
   returnVisibleHistoryToLive();
@@ -1953,12 +2037,10 @@ for (const name of ["pointerdown", "keydown", "touchstart"]) {
 document.addEventListener("visibilitychange", () => {
   state.lastActivityAt = Date.now();
   if (document.hidden) flushInputDraft();
-  if (document.hidden) for (const view of terminalViews.values()) if (view.visible) returnToLive(view, { focus: false });
   heartbeat();
 });
-window.addEventListener("blur", () => {
-  setTimeout(() => { if (!document.hasFocus()) for (const view of terminalViews.values()) if (view.visible) returnToLive(view, { focus: false }); }, 150);
-});
+// Browser chrome, app switching and tab visibility are not an explicit request
+// to leave history. Only page controls / the live button resume live output.
 window.addEventListener("resize", syncVisualViewport, { passive: true });
 window.visualViewport?.addEventListener("resize", syncVisualViewport, { passive: true });
 window.visualViewport?.addEventListener("scroll", syncVisualViewport, { passive: true });

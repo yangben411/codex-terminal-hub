@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
 // Hooks only exist in this in-memory test bundle, never in public/terminal.js.
 const compiled = await build({
-  stdin: { contents: source + "\nwindow.hubTest = { terminalViews, openHistoryCache, returnToLive };", resolveDir: `${root}/src`, loader: "js" },
+  stdin: { contents: source + "\nwindow.hubTest = { terminalViews, openHistoryCache, returnToLive, loadEarlierHistory, fitTerminal };", resolveDir: `${root}/src`, loader: "js" },
   bundle: true, format: "esm", platform: "browser", write: false, outfile: "terminal.js",
 });
 let earlierRequests = 0, historyRequests = 0;
@@ -73,6 +73,7 @@ try {
       readyState = 0;
       constructor() {
         super();
+        window.__hubSocket = this;
         setTimeout(() => { this.readyState = 1; this.dispatchEvent(new Event("open")); this.message({ type: "ready" }); }, 20);
       }
       message(data) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) })); }
@@ -114,6 +115,53 @@ try {
   await page.locator('#copyTextDialog button[value="close"]').click();
   await page.evaluate(() => { window.__denyCopy = false; });
 
+  // Prepending must keep the reader's latest position, not the position when
+  // the request started. Repeat to exercise replacement of an already-swapped DOM.
+  delayPage = true;
+  for (let pass = 0; pass < 2; pass++) {
+    const position = await viewAction(async () => {
+      const view = [...hubTest.terminalViews.values()][0];
+      view.historyTerm.scrollToLine(50);
+      const original = view.historyTerm;
+      const pending = hubTest.loadEarlierHistory(view);
+      await new Promise(resolve => setTimeout(resolve, 70));
+      original.scrollToLine(65);
+      const text = original.buffer.active.getLine(original.buffer.active.viewportY).translateToString();
+      await pending;
+      return { text, after: view.historyTerm.buffer.active.getLine(view.historyTerm.buffer.active.viewportY).translateToString(), replaced: original !== view.historyTerm, active: view.historyActive };
+    });
+    assert.equal(position.after, position.text, "prepend must preserve the exact viewed line");
+    assert.equal(position.replaced, true);
+    assert.equal(position.active, true);
+  }
+  await viewAction(() => {
+    window.dispatchEvent(new Event("blur"));
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "hidden", { configurable: true, value: false });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(200);
+  assert.equal(await viewAction(() => [...hubTest.terminalViews.values()][0].historyActive), true,
+    "temporary blur/backgrounding must preserve history mode");
+  const readingLine = await viewAction(() => {
+    const view = [...hubTest.terminalViews.values()][0];
+    return view.historyTerm.buffer.active.getLine(view.historyTerm.buffer.active.viewportY).translateToString(true);
+  });
+  await viewAction(() => {
+    const view = [...hubTest.terminalViews.values()][0];
+    window.__hubSocket.message({ type: "output", session: view.slug, seq: 2, data: "background output\r\n".repeat(200) });
+    mockViewport(360, 730);
+  });
+  await page.waitForTimeout(450);
+  assert.equal(await viewAction(() => {
+    const view = [...hubTest.terminalViews.values()][0];
+    return view.historyTerm.buffer.active.getLine(view.historyTerm.buffer.active.viewportY).translateToString(true);
+  }), readingLine, "live output and viewport reflow must not move the history reading line");
+  await viewAction(() => mockViewport(390, 844));
+  await page.waitForTimeout(300);
+  delayPage = false;
+
   // A programmatic xterm scroll/resize is not a user request for another page.
   const initialPages = earlierRequests;
   await viewAction(() => {
@@ -146,13 +194,33 @@ try {
       const input = document.querySelector("#terminalInput").getBoundingClientRect();
       const composer = document.querySelector("#composer").getBoundingClientRect();
       const terminal = document.querySelector("#terminalView").getBoundingClientRect();
+      const screen = document.querySelector(".xterm-host .xterm-screen").getBoundingClientRect();
+      const host = document.querySelector(".xterm-host").getBoundingClientRect();
       return { inputTop: input.top, inputBottom: input.bottom, inputRight: input.right,
-        composerTop: composer.top, terminalBottom: terminal.bottom };
+        composerTop: composer.top, terminalBottom: terminal.bottom,
+        screenBottom: screen.bottom, hostBottom: host.bottom, hostTop: host.top };
     });
     assert.ok(geometry.inputTop >= top && geometry.inputBottom <= top + height + 1, JSON.stringify(geometry));
     assert.ok(geometry.inputRight <= width + 1, JSON.stringify(geometry));
     assert.ok(geometry.terminalBottom <= geometry.composerTop + 1, "input must not overlap the terminal");
+    assert.ok(geometry.screenBottom <= geometry.hostBottom + 1
+      && geometry.screenBottom > geometry.hostTop
+      && Math.abs(geometry.screenBottom - geometry.hostBottom) <= 8,
+    `the session's bottom row must stay visible above controls: ${JSON.stringify(geometry)}`);
   }
+  await page.evaluate(() => {
+    const view = [...hubTest.terminalViews.values()][0];
+    view.term.focus();
+    mockViewport(390, 300, 60);
+  });
+  await page.waitForTimeout(350);
+  assert.equal(await page.evaluate(() => {
+    const view = [...hubTest.terminalViews.values()][0];
+    const screen = view.host.querySelector(".xterm-screen").getBoundingClientRect();
+    const host = view.host.getBoundingClientRect();
+    return screen.bottom <= host.bottom + 1 && screen.bottom > host.top;
+  }), true, "direct session typing must also retain the bottom input row");
+  await page.locator("#terminalInput").focus();
   assert.equal(historyRequests, focusedRequests, "keyboard changes must not trigger history requests");
   // A browser may pan the layout after its last visualViewport event.
   await page.evaluate(() => { document.body.style.marginTop = "80px"; });
@@ -213,6 +281,13 @@ try {
     "history momentum must stop when input gets focus");
 
   // Desktop uses the same bottom-row layout without covering terminal cells.
+  await page.evaluate(() => {
+    document.activeElement.blur();
+    mockViewport(390, 844);
+  });
+  await page.waitForTimeout(350);
+  assert.equal(await page.evaluate(() => [...hubTest.terminalViews.values()][0].term.element.style.transform), "",
+    "closing the keyboard must remove the terminal-only lift");
   await page.setViewportSize({ width: 1280, height: 450 });
   await page.evaluate(() => mockViewport(1280, 450));
   await page.waitForTimeout(300);
@@ -224,7 +299,7 @@ try {
   assert.ok(desktop.inputBottom <= 450 && desktop.terminalBottom <= desktop.composerTop + 1, JSON.stringify(desktop));
   assert.equal(await page.locator(".composer-session-name").isVisible(), true, "desktop retains the target name");
   assert.deepEqual(errors, []);
-  console.log("Mobile regression passed: gesture-only pagination, stale response discard, keyboard viewport containment, no overlap, input ACK, cancelled touch momentum, desktop layout.");
+  console.log("Mobile regression passed: stable history prepend/reflow/background output, blur retention, gesture-only pagination, stale response discard, keyboard viewport containment, no overlap, input ACK, cancelled touch momentum, desktop layout.");
 } finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));
