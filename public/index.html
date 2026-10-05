@@ -10,7 +10,7 @@
     <title>Codex Terminal Hub</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/terminal-icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css?v=20261005-keyboard-rollback" />
+    <link rel="stylesheet" href="/app.css?v=20261005-history-selection" />
     <link rel="stylesheet" href="/terminal.css?v=0.3.0" />
   </head>
   <body>
@@ -71,7 +71,7 @@
             <span id="viewSubtitle">全部 tmux 工作区</span>
           </div>
           <div class="topbar-actions">
-            <button class="icon-button" id="openCopyText" type="button" title="手机点击复制当前屏幕；桌面打开纯文本选择" hidden>复制</button>
+            <button class="icon-button" id="openCopyText" type="button" title="手机历史页原位选字复制；实时页复制整屏；桌面打开纯文本" hidden>复制</button>
             <button class="quiet-button" id="overviewButton">总览</button>
             <button class="quiet-button" id="multiViewButton">多窗</button>
             <button class="quiet-button" id="newWindowButton" disabled>＋ Window</button>
@@ -281,6 +281,6 @@
       </form>
     </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/terminal.js?v=20261005-session-bottom" type="module"></script>
+    <script src="/terminal.js?v=20261005-history-selection" type="module"></script>
   </body>
 </html>

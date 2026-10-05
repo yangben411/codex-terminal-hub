@@ -815,6 +815,7 @@ async function openHistoryCache(view) {
 }
 
 function returnToLive(view, { focus = true } = {}) {
+  closeHistorySelection(view);
   for (const cancel of view.cancelHistoryGestures) cancel();
   view.historyGeneration += 1;
   if (!view.historyActive) {
@@ -1472,6 +1473,61 @@ function showToast(message, type = "success") {
 
 let copyTextSnapshot = null;
 
+function closeHistorySelection(view) {
+  if (!view.selectionLayer) return;
+  const selection = window.getSelection();
+  if (selection?.anchorNode && view.selectionLayer.contains(selection.anchorNode)) selection.removeAllRanges();
+  view.selectionLayer.remove();
+  view.selectionLayer = null;
+  view.panel.classList.remove("selecting-history");
+}
+
+function showHistorySelection(view, text) {
+  if (view.selectionLayer) return;
+  for (const cancel of view.cancelHistoryGestures) cancel();
+  const layer = document.createElement("section");
+  layer.className = "history-text-selection";
+  layer.setAttribute("aria-label", "历史屏幕文字选择");
+  layer.innerHTML = `<div class="history-selection-actions">
+    <button type="button" data-copy-selection>复制选中</button>
+    <button type="button" data-copy-screen>复制整屏</button>
+    <button type="button" data-close-selection>返回历史</button>
+    </div><p role="status">长按下方文字，拖动选择手柄，使用系统“复制”或“复制选中”。</p>
+    <pre tabindex="0" aria-label="可长按选择的历史文字"></pre>`;
+  const content = layer.querySelector("pre");
+  content.textContent = text;
+  content.style.fontFamily = view.historyTerm.options.fontFamily;
+  content.style.fontSize = `${view.historyTerm.options.fontSize}px`;
+  const feedback = layer.querySelector("p");
+  let selectedText = "";
+  const rememberSelection = () => {
+    const selection = window.getSelection();
+    if (selection?.anchorNode && content.contains(selection.anchorNode)
+      && selection.focusNode && content.contains(selection.focusNode)) selectedText = selection.toString();
+    return selectedText;
+  };
+  // Read the selection before a button focus change can collapse iOS handles.
+  layer.addEventListener("pointerdown", event => {
+    if (event.target.closest("button")) rememberSelection();
+    else selectedText = "";
+  }, { capture: true });
+  const copy = async value => {
+    if (!value) { feedback.textContent = "请先长按并选中要复制的文字。"; return; }
+    try {
+      await navigator.clipboard.writeText(value);
+      feedback.textContent = "已复制到剪贴板。";
+    } catch {
+      feedback.textContent = "浏览器未允许直接复制，请长按文字并使用系统菜单中的“复制”。";
+    }
+  };
+  layer.querySelector("[data-copy-selection]").addEventListener("click", () => copy(rememberSelection()));
+  layer.querySelector("[data-copy-screen]").addEventListener("click", () => copy(text));
+  layer.querySelector("[data-close-selection]").addEventListener("click", () => closeHistorySelection(view));
+  view.selectionLayer = layer;
+  view.panel.classList.add("selecting-history");
+  view.historyLayer.append(layer);
+}
+
 function updateCopyText() {
   elements.copyTextContent.value = copyTextSnapshot?.[elements.copyTextScope.value] || "";
   elements.copyTextContent.scrollTop = 0;
@@ -1528,6 +1584,10 @@ elements.openCopyText.addEventListener("click", async () => {
   const view = terminalViews.get(slug);
   if (!view?.visible) return showToast("请先打开一个 session", "error");
   if (view.historyOpening) return showToast("缓存正在加载，请稍后复制", "error");
+  if (view.historyActive) {
+    showHistorySelection(view, terminalPlainText(view.historyTerm));
+    return;
+  }
   const terminal = view.historyActive ? view.historyTerm : view.term;
   const snapshot = {
     screen: terminalPlainText(terminal),

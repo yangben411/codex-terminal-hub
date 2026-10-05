@@ -98,6 +98,13 @@ try {
   await page.waitForFunction(() => [...window.hubTest?.terminalViews.values() || []].some(view => view.inputReady && view.historyReady));
   assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "input-ready only after terminal snapshot");
   assert.equal(await page.locator(".composer-session-name").isVisible(), false, "mobile status omits session name");
+  assert.equal(await page.locator("#windowStrip").isVisible(), false, "mobile omits tmux window strip");
+  assert.equal(await page.locator("#newWindowButton").isVisible(), false, "mobile omits new window control");
+  assert.equal(await page.locator("#openSidebar").isVisible(), true, "session menu remains accessible");
+  assert.ok(await page.evaluate(() => Math.abs(
+    document.querySelector("#terminalGrid").getBoundingClientRect().top
+    - document.querySelector("#terminalView").getBoundingClientRect().top,
+  ) < 1), "removed window strip must not leave an empty grid row");
   await page.locator("#openCopyText").tap();
   assert.match(await page.evaluate(() => window.__copiedText), /LIVE/);
   assert.equal(await page.locator("#copyTextDialog").evaluate(el => el.open), false, "successful mobile copy needs no dialog");
@@ -105,14 +112,37 @@ try {
   await viewAction(async () => { await hubTest.openHistoryCache([...hubTest.terminalViews.values()][0]); });
   await page.waitForTimeout(250);
 
+  const copyPosition = await viewAction(() => [...hubTest.terminalViews.values()][0].historyTerm.buffer.active.viewportY);
   await page.locator("#openCopyText").tap();
-  assert.match(await page.evaluate(() => window.__copiedText), /历史第/);
-  assert.equal(await page.evaluate(() => [...hubTest.terminalViews.values()][0].historyActive), true, "copy must preserve the viewed history screen");
-  await page.evaluate(() => { window.__denyCopy = true; });
-  await page.locator("#openCopyText").tap();
-  await page.locator("#copyTextContent").waitFor({ state: "visible" });
-  assert.match(await page.locator("#copyTextContent").inputValue(), /历史第/);
-  await page.locator('#copyTextDialog button[value="close"]').click();
+  const selectionText = page.locator(".history-text-selection pre");
+  assert.match(await selectionText.textContent(), /历史第/);
+  assert.equal(await selectionText.evaluate(el => getComputedStyle(el).webkitUserSelect), "text");
+  assert.equal(await page.locator("#copyTextDialog").evaluate(el => el.open), false, "history selection stays in the session, not a dialog");
+  const selected = await selectionText.evaluate(el => {
+    const range = document.createRange();
+    range.setStart(el.firstChild, 0);
+    range.setEnd(el.firstChild, 6);
+    const selection = getSelection();
+    selection.removeAllRanges(); selection.addRange(range);
+    return selection.toString();
+  });
+  await page.locator("[data-copy-selection]").tap();
+  assert.equal(await page.evaluate(() => window.__copiedText), selected, "copy the chosen substring, not all history");
+  await page.locator("[data-copy-screen]").tap();
+  assert.equal(await page.evaluate(() => window.__copiedText), await selectionText.textContent());
+  assert.equal(await page.evaluate(() => [...hubTest.terminalViews.values()][0].historyActive), true, "copy preserves history mode");
+  const frozenSelection = await selectionText.textContent();
+  await page.evaluate(() => {
+    window.__denyCopy = true;
+    const view = [...hubTest.terminalViews.values()][0];
+    window.__hubSocket.message({ type: "output", session: view.slug, seq: 2, data: "new output\r\n" });
+  });
+  await page.locator("[data-copy-screen]").tap();
+  assert.match(await page.locator(".history-text-selection p").textContent(), /系统菜单/);
+  assert.equal(await selectionText.textContent(), frozenSelection, "output must not mutate selected text");
+  await page.locator("[data-close-selection]").tap();
+  assert.equal(await viewAction(() => [...hubTest.terminalViews.values()][0].historyTerm.buffer.active.viewportY), copyPosition);
+  assert.equal(await selectionText.count(), 0);
   await page.evaluate(() => { window.__denyCopy = false; });
 
   // Prepending must keep the reader's latest position, not the position when
@@ -150,7 +180,7 @@ try {
   });
   await viewAction(() => {
     const view = [...hubTest.terminalViews.values()][0];
-    window.__hubSocket.message({ type: "output", session: view.slug, seq: 2, data: "background output\r\n".repeat(200) });
+    window.__hubSocket.message({ type: "output", session: view.slug, seq: 3, data: "background output\r\n".repeat(200) });
     mockViewport(360, 730);
   });
   await page.waitForTimeout(450);
@@ -177,6 +207,9 @@ try {
   delayPage = true;
   const before = earlierRequests;
   const frozen = await viewAction(() => [...hubTest.terminalViews.values()][0].historyContent);
+  // The explicit resize above can move xterm's viewport; place the user at
+  // the pagination boundary after it settles before testing a wheel request.
+  await viewAction(() => [...hubTest.terminalViews.values()][0].historyTerm.scrollToTop());
   await page.locator(".xterm-history-host").dispatchEvent("wheel", { deltaY: -100 });
   await page.waitForFunction(() => [...hubTest.terminalViews.values()][0].historyLoadingEarlier);
   await page.locator("#terminalInput").focus();
@@ -298,6 +331,8 @@ try {
   }));
   assert.ok(desktop.inputBottom <= 450 && desktop.terminalBottom <= desktop.composerTop + 1, JSON.stringify(desktop));
   assert.equal(await page.locator(".composer-session-name").isVisible(), true, "desktop retains the target name");
+  assert.equal(await page.locator("#windowStrip").isVisible(), true, "desktop retains window strip");
+  assert.equal(await page.locator("#newWindowButton").isVisible(), true, "desktop retains new window control");
   assert.deepEqual(errors, []);
   console.log("Mobile regression passed: stable history prepend/reflow/background output, blur retention, gesture-only pagination, stale response discard, keyboard viewport containment, no overlap, input ACK, cancelled touch momentum, desktop layout.");
 } finally {
