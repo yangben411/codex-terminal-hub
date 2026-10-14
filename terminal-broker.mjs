@@ -69,6 +69,8 @@ export class TerminalBroker {
     this.terminalResponses = 0;
     this.closed = false;
     this.startPromise = null;
+    this.lastRepaintNudgeAt = 0;
+    this.repaintNudgeTimer = null;
   }
 
   async start() {
@@ -170,6 +172,10 @@ export class TerminalBroker {
     }
     this.#writeHeadless(data, seq);
     for (const listener of this.listeners) listener(item);
+    
+    // Schedule a repaint nudge to fix display issues with TUI apps (e.g. Claude Code/Ink)
+    // that may buffer output without refreshing the screen until a resize
+    this.#scheduleRepaintNudge();
   }
 
   #writeHeadless(data, seq) {
@@ -260,9 +266,40 @@ export class TerminalBroker {
     this.idleTimer = null;
   }
 
+  #scheduleRepaintNudge() {
+    clearTimeout(this.repaintNudgeTimer);
+    this.repaintNudgeTimer = null;
+    // Wait for output to stabilize (3 seconds of no new output)
+    this.repaintNudgeTimer = setTimeout(() => {
+      this.#performRepaintNudge();
+    }, 3000);
+    this.repaintNudgeTimer.unref?.();
+  }
+
+  #performRepaintNudge() {
+    if (this.closed || !this.pty) return;
+    const now = Date.now();
+    // Only nudge once every 10 seconds to avoid excessive SIGWINCH
+    if (now - this.lastRepaintNudgeAt < 10000) return;
+    this.lastRepaintNudgeAt = now;
+    
+    // Send a tiny resize that immediately reverts to trigger SIGWINCH
+    // This forces TUI apps (Claude Code/Ink) to repaint and show buffered output
+    try {
+      this.pty.resize(this.cols + 1, this.rows);
+      setTimeout(() => {
+        if (!this.closed && this.pty) {
+          this.pty.resize(this.cols, this.rows);
+        }
+      }, 50);
+    } catch {}
+  }
+
   close() {
     this.closed = true;
     this.#clearIdleTimer();
+    clearTimeout(this.repaintNudgeTimer);
+    this.repaintNudgeTimer = null;
     this.listeners.clear();
     this.exitListeners.clear();
     if (this.pty) {
