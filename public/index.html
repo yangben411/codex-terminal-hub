@@ -10,7 +10,7 @@
     <title>Codex Terminal Hub</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/terminal-icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css?v=20261005-history-selection" />
+    <link rel="stylesheet" href="/app.css?v=20261013-input-width" />
     <link rel="stylesheet" href="/terminal.css?v=0.3.0" />
   </head>
   <body>
@@ -71,7 +71,7 @@
             <span id="viewSubtitle">全部 tmux 工作区</span>
           </div>
           <div class="topbar-actions">
-            <button class="icon-button" id="openCopyText" type="button" title="手机历史页原位选字复制；实时页复制整屏；桌面打开纯文本" hidden>复制</button>
+            <button class="icon-button" id="openCopyText" type="button" title="手机缓存可直接长按选字；实时页复制整屏；桌面打开纯文本" hidden>复制</button>
             <button class="quiet-button" id="overviewButton">总览</button>
             <button class="quiet-button" id="multiViewButton">多窗</button>
             <button class="quiet-button" id="newWindowButton" disabled>＋ Window</button>
@@ -125,10 +125,14 @@
             <button data-key="ctrl-l">Ctrl-L</button>
           </div>
           <div class="mobile-control-deck">
-            <div class="composer-connection" id="composerStatus" data-state="offline" role="status" aria-live="polite"><span class="composer-session-name"></span><span class="composer-state-label">终端未连接</span></div>
+            <div class="composer-status-row">
+              <div class="composer-connection" id="composerStatus" data-state="offline" role="status" aria-live="polite"><span class="composer-session-name"></span><span class="composer-state-label">终端未连接</span></div>
+              <button id="dismissKeyboard" class="dismiss-keyboard" type="button" aria-label="收起手机键盘">收起键盘⌄</button>
+            </div>
             <div class="mobile-dpad" id="mobileDpad" role="group" aria-label="移动端方向键">
               <button class="dpad-shift-left" data-key="shift-left" aria-label="Shift 加左方向键" title="发送 Shift+← 到当前终端"><small>Shift</small><span>←</span></button>
               <button class="dpad-up" data-key="up" aria-label="向上">↑</button>
+              <button class="dpad-escape" data-key="escape" aria-label="Esc 退出键" title="发送 Esc 到当前终端">Esc</button>
               <button class="dpad-left" data-key="left" aria-label="向左">←</button>
               <button class="dpad-enter" data-key="enter" aria-label="确认">
                 <span>↵</span>
@@ -281,6 +285,6 @@
       </form>
     </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/terminal.js?v=20261005-history-selection" type="module"></script>
+    <script src="/terminal.js?v=20261014-agy-viewport" type="module"></script>
   </body>
 </html>

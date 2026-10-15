@@ -27,7 +27,7 @@ const server = http.createServer(async (request, response) => {
       earlierRequests++;
       if (delayPage) await new Promise(resolve => setTimeout(resolve, 250));
     }
-    return json({ content: Array.from({ length: 160 }, (_, i) => `历史第 ${i} 行\r\n`).join(""),
+    return json({ content: Array.from({ length: 160 }, (_, i) => `\x1b[31m历史第\x1b[0m ${i} 行\r\n`).join(""),
       lines: 160, capturedAt: historyRequests, nextBefore: historyRequests * 160, hasEarlier: true, pending: false });
   }
   if (url.pathname === "/api/sessions") return json({ sessions: [session], defaultCwd: "/tmp" });
@@ -98,6 +98,10 @@ try {
   await page.waitForFunction(() => [...window.hubTest?.terminalViews.values() || []].some(view => view.inputReady && view.historyReady));
   assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "input-ready only after terminal snapshot");
   assert.equal(await page.locator(".composer-session-name").isVisible(), false, "mobile status omits session name");
+  await page.locator("#mobileDirectionToggle").tap();
+  await page.locator('#mobileDpad [data-key="escape"]').tap();
+  assert.equal(await page.evaluate(() => window.__hubInputs.at(-1)), "\x1b", "Esc sends the escape byte to the session");
+  await page.locator("#mobileDirectionToggle").tap();
   assert.equal(await page.locator("#windowStrip").isVisible(), false, "mobile omits tmux window strip");
   assert.equal(await page.locator("#newWindowButton").isVisible(), false, "mobile omits new window control");
   assert.equal(await page.locator("#openSidebar").isVisible(), true, "session menu remains accessible");
@@ -109,7 +113,7 @@ try {
   assert.match(await page.evaluate(() => window.__copiedText), /LIVE/);
   assert.equal(await page.locator("#copyTextDialog").evaluate(el => el.open), false, "successful mobile copy needs no dialog");
   const viewAction = async action => page.evaluate(action);
-  await viewAction(async () => { await hubTest.openHistoryCache([...hubTest.terminalViews.values()][0]); });
+  await viewAction(async () => { await hubTest.openHistoryCache([...hubTest.terminalViews.values()][0], { native: false }); });
   await page.waitForTimeout(250);
 
   const copyPosition = await viewAction(() => [...hubTest.terminalViews.values()][0].historyTerm.buffer.active.viewportY);
@@ -220,6 +224,41 @@ try {
   assert.equal(await viewAction(() => [...hubTest.terminalViews.values()][0].historyActive), false);
   const focusedRequests = historyRequests;
   const keyboardResizes = await page.evaluate(() => window.__hubResizeCount || 0);
+  // A sparse screen must not be lifted to its empty final row. Also cover a
+  // agy-style TUI: the cursor is parked at the top, but the actual input and
+  // footer are at the bottom. A parked cursor must not pin the visible region.
+  for (const footer of [false, true]) {
+    await page.evaluate(async footer => {
+      const view = [...hubTest.terminalViews.values()][0];
+      await new Promise(resolve => view.term.write("\x1b[2J\x1b[Hvisible prompt\r\n> "
+        + (footer ? `\x1b[${view.term.rows - 1};1Hsession input\x1b[${view.term.rows};1Hmodel footer\x1b[1;3H` : ""), resolve));
+      hubTest.fitTerminal(view);
+    }, footer);
+    await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(footer => {
+      const view = [...hubTest.terminalViews.values()][0];
+      const screen = view.host.querySelector(".xterm-screen").getBoundingClientRect();
+      const host = view.host.getBoundingClientRect();
+      const rowHeight = screen.height / view.term.rows;
+      const firstRow = footer ? view.term.rows - 2 : view.term.buffer.active.cursorY;
+      const lastRow = footer ? view.term.rows - 1 : firstRow;
+      const firstTop = screen.top + firstRow * rowHeight;
+      const lastBottom = screen.top + (lastRow + 1) * rowHeight;
+      return firstTop >= host.top && lastBottom <= host.bottom;
+    }, footer), true, footer
+      ? "parked top cursor must not crop agy's bottom input and model footer"
+      : "sparse prompt must remain visible instead of an empty black tail");
+  }
+  await page.locator("#terminalInput").fill("保留草稿");
+  await page.locator("#dismissKeyboard").tap();
+  assert.equal(await page.locator("#terminalInput").evaluate(el => document.activeElement === el), false);
+  assert.equal(await page.locator("#terminalInput").inputValue(), "保留草稿");
+  await page.locator("#terminalInput").focus();
+  await page.evaluate(async () => {
+    const view = [...hubTest.terminalViews.values()][0];
+    await new Promise(resolve => view.term.write("\x1b[2J\x1b[H" + Array.from({ length: view.term.rows }, () => "filled row").join("\r\n"), resolve));
+    hubTest.fitTerminal(view);
+  });
   for (const [width, height, top] of [[390, 280, 100], [320, 300, 0], [390, 410, 50]]) {
     await page.evaluate(([w, h, y]) => mockViewport(w, h, y), [width, height, top]);
     await page.waitForTimeout(250);
@@ -229,12 +268,20 @@ try {
       const terminal = document.querySelector("#terminalView").getBoundingClientRect();
       const screen = document.querySelector(".xterm-host .xterm-screen").getBoundingClientRect();
       const host = document.querySelector(".xterm-host").getBoundingClientRect();
+      const dismiss = document.querySelector("#dismissKeyboard").getBoundingClientRect();
       return { inputTop: input.top, inputBottom: input.bottom, inputRight: input.right,
+        dismissTop: dismiss.top, dismissBottom: dismiss.bottom,
         composerTop: composer.top, terminalBottom: terminal.bottom,
-        screenBottom: screen.bottom, hostBottom: host.bottom, hostTop: host.top };
+        screenBottom: screen.bottom, hostBottom: host.bottom, hostTop: host.top,
+        screenLeft: screen.left, screenRight: screen.right, hostLeft: host.left, hostRight: host.right };
     });
     assert.ok(geometry.inputTop >= top && geometry.inputBottom <= top + height + 1, JSON.stringify(geometry));
     assert.ok(geometry.inputRight <= width + 1, JSON.stringify(geometry));
+    assert.ok(geometry.screenLeft >= geometry.hostLeft && geometry.screenRight <= geometry.hostRight + 1,
+      `terminal input and footer must fit the visible width without PTY reflow: ${JSON.stringify(geometry)}`);
+    assert.equal(await page.locator(".composer-row").evaluate(el => el.scrollWidth <= el.clientWidth + 1), true,
+      "the entire input row, including send button, must fit its container");
+    assert.ok(geometry.dismissTop >= top && geometry.dismissBottom <= top + height, "dismiss button stays in the visual viewport");
     assert.ok(geometry.terminalBottom <= geometry.composerTop + 1, "input must not overlap the terminal");
     assert.ok(geometry.screenBottom <= geometry.hostBottom + 1
       && geometry.screenBottom > geometry.hostTop
@@ -253,6 +300,20 @@ try {
     const host = view.host.getBoundingClientRect();
     return screen.bottom <= host.bottom + 1 && screen.bottom > host.top;
   }), true, "direct session typing must also retain the bottom input row");
+  const scrollSamples = await page.evaluate(() => {
+    const view = [...hubTest.terminalViews.values()][0];
+    const samples = [];
+    for (const offset of [0, 30, 60, 90]) {
+      view.host.scrollTop = offset;
+      samples.push({ offset: view.host.scrollTop, gap: view.host.getBoundingClientRect().bottom - view.host.querySelector(".xterm-screen").getBoundingClientRect().bottom });
+    }
+    view.host.scrollTop = 0;
+    return samples;
+  });
+  for (const sample of scrollSamples) {
+    assert.equal(sample.offset, 0, "outer terminal wrapper must not accumulate focus-induced scroll");
+    assert.ok(sample.gap >= 0 && sample.gap <= 8, `terminal bottom must stay aligned: ${JSON.stringify(sample)}`);
+  }
   await page.locator("#terminalInput").focus();
   assert.equal(historyRequests, focusedRequests, "keyboard changes must not trigger history requests");
   // A browser may pan the layout after its last visualViewport event.
@@ -260,18 +321,35 @@ try {
   await page.waitForTimeout(150);
   const inputWithinKeyboard = await page.locator("#terminalInput").evaluate(el => el.getBoundingClientRect().bottom <= visualViewport.offsetTop + visualViewport.height + 1);
   assert.equal(inputWithinKeyboard, true, "late keyboard pan must not cover the input");
+  // Moving focus into the terminal must not stop tracking after the old
+  // composer-only 800ms grace period and leave its compensation behind.
+  await page.evaluate(() => [...hubTest.terminalViews.values()][0].term.focus());
+  await page.waitForTimeout(1000);
   await page.evaluate(() => { document.body.style.marginTop = "0px"; });
   await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.documentElement.style.getPropertyValue("--app-keyboard-shift")), "",
+    "the old lift must fall to zero while direct terminal input remains focused");
+  for (const pan of [95, 35, 0, 70, 0]) {
+    await page.evaluate(pan => { document.body.style.marginTop = `${pan}px`; }, pan);
+    await page.waitForTimeout(100);
+    const compensation = await page.evaluate(() => parseFloat(document.documentElement.style.getPropertyValue("--app-keyboard-shift")) || 0);
+    assert.ok(Math.abs(compensation - pan) <= 1, `compensation follows current pan, including decreases: ${compensation} vs ${pan}`);
+  }
+  await page.locator("#terminalInput").focus();
   assert.equal(await page.evaluate(() => window.__hubResizeCount || 0), keyboardResizes, "keyboard changes must not resize tmux through observers or timers");
   await page.locator("#terminalInput").fill("测试输入");
   await page.evaluate(() => { window.__hubHoldAck = true; });
   await page.locator("#terminalInput").press("Enter");
   assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "sending", `show pending terminal acknowledgement: ${JSON.stringify({ errors, input: await page.locator("#terminalInput").inputValue(), sent: await page.evaluate(() => window.__hubInputs) })}`);
   assert.equal(await page.locator("#terminalInput").evaluate(el => el.readOnly), true);
+  assert.equal(await page.locator(".composer-row").evaluate(el => el.scrollWidth <= el.clientWidth + 1), true,
+    "pending acknowledgement text must not push input controls outside the screen");
+  await page.locator("#dismissKeyboard").tap();
   await page.evaluate(() => { window.__hubHoldAck = false; window.__hubReleaseAck(); });
   await page.waitForFunction(() => document.querySelector("#terminalInput").value === "");
   assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "return to ready after acknowledgement");
-  assert.equal(await page.locator("#terminalInput").evaluate(el => document.activeElement === el), true);
+  assert.equal(await page.locator("#terminalInput").evaluate(el => document.activeElement === el), false,
+    "late input ACK must not reopen the dismissed keyboard");
   assert.equal(historyRequests, focusedRequests, "input ACK must not start history loading");
   const punctuation = "，。！？：；‘’“”【】（）<>@#$%&*+-=_/\\";
   await page.locator("#terminalInput").fill(punctuation);
@@ -296,7 +374,7 @@ try {
   await page.evaluate(async () => {
     document.activeElement.blur();
     const view = [...hubTest.terminalViews.values()][0];
-    await hubTest.openHistoryCache(view);
+    await hubTest.openHistoryCache(view, { native: false });
     view.historyTerm.options.smoothScrollDuration = 0;
   });
   await page.waitForTimeout(200);
@@ -321,6 +399,88 @@ try {
   await page.waitForTimeout(350);
   assert.equal(await page.evaluate(() => [...hubTest.terminalViews.values()][0].term.element.style.transform), "",
     "closing the keyboard must remove the terminal-only lift");
+  assert.equal(await page.evaluate(() => [...hubTest.terminalViews.values()][0].term.options.fontSize), 14,
+    "closing the keyboard restores the original terminal font size");
+  await page.evaluate(async () => { await hubTest.openHistoryCache([...hubTest.terminalViews.values()][0]); });
+  const nativeReader = page.locator(".native-history-reader pre");
+  await nativeReader.waitFor({ state: "visible" });
+  assert.equal(await nativeReader.locator("span").first().evaluate(el => getComputedStyle(el).color), "rgb(255, 123, 134)", "native selection keeps the terminal's ANSI theme color");
+  if (process.env.HISTORY_SCREENSHOT) await page.screenshot({ path: process.env.HISTORY_SCREENSHOT });
+  assert.ok(await nativeReader.evaluate(el => el.scrollHeight > el.clientHeight * 3), "native history contains multiple screens, not a viewport snapshot");
+  // Reproduce the blanket outside-focus teardown with a tiny native Range.
+  // This validates our event policy, not whether iOS actually emits the event.
+  const smallSelection = await nativeReader.evaluate(el => {
+    const text = document.createTreeWalker(el, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(text, 0); range.setEnd(text, Math.min(1, text.length));
+    getSelection().removeAllRanges(); getSelection().addRange(range);
+    document.body.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "touch", bubbles: true }));
+    return { connected: el.isConnected, selected: getSelection().toString() };
+  });
+  assert.equal(smallSelection.connected, true, "body focus must not destroy the history text layer");
+  assert.equal(smallSelection.selected.length, 1, "a one-character selection must survive outside non-control events");
+  await page.evaluate(() => getSelection().removeAllRanges());
+  delayPage = true;
+  const pagesBeforeHold = earlierRequests;
+  await nativeReader.dispatchEvent("pointerdown", { pointerType: "touch", pointerId: 99 });
+  await nativeReader.evaluate(el => { el.scrollTop = 0; });
+  await nativeReader.dispatchEvent("pointercancel", { pointerType: "touch", pointerId: 99 });
+  await page.waitForTimeout(650);
+  assert.equal(earlierRequests, pagesBeforeHold, "long-press preparation must freeze pagination before a Range exists");
+  await nativeReader.dispatchEvent("touchend", { touches: [], changedTouches: [] });
+  await page.waitForTimeout(450);
+  assert.equal(earlierRequests, pagesBeforeHold, "native handoff remains protected after release without relying on a 400ms timeout");
+  // An explicit new swipe with no selection permits pagination again.
+  await nativeReader.dispatchEvent("pointerdown", { pointerType: "touch", pointerId: 100, clientY: 20 });
+  await nativeReader.dispatchEvent("pointermove", { pointerType: "touch", pointerId: 100, clientY: 80 });
+  await nativeReader.dispatchEvent("pointercancel", { pointerType: "touch", pointerId: 100 });
+  await nativeReader.dispatchEvent("touchend", { touches: [], changedTouches: [] });
+  await page.waitForFunction(() => [...hubTest.terminalViews.values()][0].historyLoadingEarlier);
+  const crossScreenText = await nativeReader.evaluate(el => {
+    const range = document.createRange();
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const first = walker.nextNode();
+    range.setStart(first, 0);
+    let node = first, remaining = Math.min(900, el.textContent.length);
+    while (remaining > node.length) { remaining -= node.length; node = walker.nextNode(); }
+    range.setEnd(node, remaining);
+    getSelection().removeAllRanges(); getSelection().addRange(range);
+    el.scrollTop = el.clientHeight;
+    return getSelection().toString();
+  });
+  const selectedNodeText = await nativeReader.textContent();
+  await page.waitForTimeout(400);
+  assert.equal(await nativeReader.textContent(), selectedNodeText, "in-flight pagination cannot replace a native selection");
+  assert.equal(await page.evaluate(() => getSelection().toString()), crossScreenText, "cross-screen selection survives scrolling and network completion");
+  const frozenPages = earlierRequests;
+  await nativeReader.evaluate(el => { el.scrollTop = 0; });
+  await page.waitForTimeout(300);
+  assert.equal(earlierRequests, frozenPages, "selection pauses pagination");
+  await page.locator("[data-copy-selection]").tap();
+  assert.equal(await page.evaluate(() => window.__copiedText), crossScreenText);
+  await page.evaluate(() => getSelection().removeAllRanges());
+  await nativeReader.evaluate(el => { el.scrollTop = 200; });
+  await page.waitForFunction(() => [...hubTest.terminalViews.values()][0].historyLoadingEarlier);
+  await page.waitForFunction(() => ![...hubTest.terminalViews.values()][0].historyLoadingEarlier);
+  assert.ok((await nativeReader.textContent()).length > selectedNodeText.length, "clearing selection resumes lazy history loading");
+  await page.locator("[data-native-select]").tap();
+  const nativeField = page.locator(".history-native-input");
+  assert.equal(await nativeField.isVisible(), true);
+  const fieldSelection = await nativeField.evaluate(el => {
+    if (!el.readOnly) throw new Error("selection fallback must never allow terminal text edits");
+    el.setSelectionRange(0, 900);
+    return el.value.slice(el.selectionStart, el.selectionEnd);
+  });
+  await page.locator("[data-copy-selection]").tap();
+  assert.equal(await page.evaluate(() => window.__copiedText), fieldSelection);
+  assert.equal(await page.evaluate(() => [...hubTest.terminalViews.values()][0].historyActive), true);
+  await page.locator("[data-native-select]").tap();
+  assert.equal(await nativeReader.isVisible(), true);
+  await page.locator("#terminalInput").focus();
+  assert.equal(await nativeReader.count(), 0);
+  assert.equal(await page.evaluate(() => [...hubTest.terminalViews.values()][0].historyActive), false);
+  await page.locator("#terminalInput").blur();
   await page.setViewportSize({ width: 1280, height: 450 });
   await page.evaluate(() => mockViewport(1280, 450));
   await page.waitForTimeout(300);
