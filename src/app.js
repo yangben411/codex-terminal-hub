@@ -1550,6 +1550,11 @@ function closeHistorySelection(view) {
   if (!view.selectionLayer) return;
   const selection = window.getSelection();
   if (selection?.anchorNode && view.selectionLayer.contains(selection.anchorNode)) selection.removeAllRanges();
+  // Clean up event listeners
+  if (view.cleanupSelectionHandlers) {
+    view.cleanupSelectionHandlers();
+    view.cleanupSelectionHandlers = null;
+  }
   view.selectionLayer.remove();
   view.selectionLayer = null;
   view.historySelectionGuard = null;
@@ -1647,28 +1652,46 @@ function showHistorySelection(view, text, { reader = false } = {}) {
     view.historySelectionGuard = guard;
     const lineHeight = parseFloat(getComputedStyle(content).lineHeight);
     content.scrollTop = view.historyTerm.buffer.active.viewportY * lineHeight;
-    content.addEventListener("scroll", () => {
+    
+    // Ensure content is always selectable and touchable
+    content.style.userSelect = "text";
+    content.style.webkitUserSelect = "text";
+    content.style.touchAction = "auto";
+    
+    const scrollHandler = () => {
       view.historyTerm.scrollToLine(Math.floor(content.scrollTop / lineHeight));
       if (content.scrollTop <= content.clientHeight * 2 && !historyTextSelected(view)) loadEarlierHistory(view);
-    }, { passive: true });
-    content.addEventListener("pointerdown", event => {
+    };
+    content.addEventListener("scroll", scrollHandler, { passive: true });
+    
+    const pointerDownHandler = event => {
       if (event.pointerType !== "touch") return;
       guard.start(event.clientX, event.clientY, performance.now(), historyDOMSelection(view));
-    }, { passive: true });
-    content.addEventListener("pointermove", event => {
+    };
+    content.addEventListener("pointerdown", pointerDownHandler, { passive: true });
+    
+    const pointerMoveHandler = event => {
       if (event.pointerType === "touch") guard.move(event.clientX, event.clientY, performance.now(), historyDOMSelection(view));
-    }, { passive: true });
-    content.addEventListener("pointercancel", () => guard.cancel(historyDOMSelection(view)), { passive: true });
+    };
+    content.addEventListener("pointermove", pointerMoveHandler, { passive: true });
+    
+    const pointerCancelHandler = () => guard.cancel(historyDOMSelection(view));
+    content.addEventListener("pointercancel", pointerCancelHandler, { passive: true });
+    
     // Touch events continue to describe physical contact after Safari cancels
     // pointer delivery for native scrolling / long-press selection.
-    content.addEventListener("touchstart", event => {
+    const touchStartHandler = event => {
       const touch = event.touches[0];
       if (touch) guard.start(touch.clientX, touch.clientY, performance.now(), historyDOMSelection(view));
-    }, { passive: true });
-    content.addEventListener("touchmove", event => {
+    };
+    content.addEventListener("touchstart", touchStartHandler, { passive: true });
+    
+    const touchMoveHandler = event => {
       const touch = event.touches[0];
       if (touch) guard.move(touch.clientX, touch.clientY, performance.now(), historyDOMSelection(view));
-    }, { passive: true });
+    };
+    content.addEventListener("touchmove", touchMoveHandler, { passive: true });
+    
     const endTouch = event => {
       if (event.type === "pointerup" && event.pointerType !== "touch") return;
       if (event.touches?.length) return;
@@ -1679,6 +1702,18 @@ function showHistorySelection(view, text, { reader = false } = {}) {
       });
     };
     for (const type of ["pointerup", "touchend", "touchcancel"]) content.addEventListener(type, endTouch, { passive: true });
+    
+    // Store cleanup function for explicit removal
+    view.cleanupSelectionHandlers = () => {
+      content.removeEventListener("scroll", scrollHandler);
+      content.removeEventListener("pointerdown", pointerDownHandler);
+      content.removeEventListener("pointermove", pointerMoveHandler);
+      content.removeEventListener("pointercancel", pointerCancelHandler);
+      content.removeEventListener("touchstart", touchStartHandler);
+      content.removeEventListener("touchmove", touchMoveHandler);
+      for (const type of ["pointerup", "touchend", "touchcancel"]) content.removeEventListener(type, endTouch);
+    };
+    
     feedback.textContent = "直接长按选字，可拖动手柄跨屏选择；选中期间暂停加载更早历史。";
   }
 }
