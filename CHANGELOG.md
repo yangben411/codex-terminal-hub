@@ -4,7 +4,20 @@
 
 以下为 `main` 分支自 0.3.0 发布后的更新，按日期倒序排列；尚未打新版本标签。
 
-### 2026-10-14 — 修复 Claude Code 等 TUI 应用的显示刷新问题
+### 2026-10-25 — 针对 agy (Antigravity CLI) 会话的渲染、历史缓存与布局稳定性优化
+
+- 移除 `terminal-broker.mjs` 中输出后 3 秒自动发送 `cols + 1 → cols` 的后台假 resize（`#scheduleRepaintNudge` / `#performRepaintNudge`）：
+  - `agy`（基于 BubbleTea v2 `googleCursedRenderer` + `InlineStrategy`）仅在可视区渲染底部 1 屏（`availableLines`），并通过 `pushToScrollback` / `insertAbove` 将超出 1 屏的内容推入 `tmux` 滚回缓冲区。
+  - 每次 `SIGWINCH` 宽度变化都会触发 `agy` 的 `handleInlineViewport`（立即置 `pendingClear = true` 阻断滚回写入，并在 150ms 后发送 `\x1b[2J\x1b[H` 清屏重排整段对话历史），不仅导致画面每隔数秒快速重新布局并形成自激循环，而且当处于 `deferScrollbackPush` 状态（如流式输出中、输入框非空闲或弹窗激活）时，清屏重绘后只会保留最后 1 屏内容并抹除上方历史结论。
+- 历史缓存抓取避开 `SIGWINCH` 清屏窗口：`server.mjs` 的 `captureSessionHistory` 在感知到当前 `TerminalBroker` 刚发生尺寸变更（260ms 内）时等待 `agy` 完成 150ms 去抖重绘与解析后再执行 `tmux capture-pane`，同时 `ensureTerminalBroker` 复用已有 broker 时不再以默认 `100x30` 覆盖现有尺寸。
+- 实时流与触屏/键盘避让稳定性优化（`src/app.js`）：
+  - 实时 `output` 写入回调在键盘或触屏输入聚焦期间同步更新 `syncTerminalBottom(view)`，修复 `agy` 生成新内容增长到底部后被旧 `translateY(-lift)` 裁切出可视区（需手动 resize 才恢复）的问题。
+  - 在 `syncTerminalBottom` 中对输出流活跃期（180ms 内）瞬时回落的 `lift` 做防抖保持，消除 `agy` 分块重绘底栏时的上下跳动。
+  - 优化 `followKeyboardViewport` 与 `syncVisualViewport`：通过记录 `currentShift` 计算未补偿位置，避免每帧（60fps）移除再写回 `--app-keyboard-shift` 触发同步回流；记录未展开键盘时的基准高度 `keyboardBaseHeight`，修复多帧平滑收起键盘时 `keyboardOpen` 状态卡住的问题。
+  - 对前端向服务端发送的 `resize` 消息按已发送行列去重，避免每 15 秒刷新会话列表时重复触发无意义的尺寸同步。
+  - 增强实时模式下的“复制 → 已加载缓存与当前屏幕”：当实时 `xterm`（挂载于 `tmux` 客户端备用屏幕 `\x1b[?1049h`）仅有 1 屏内容但后台已预载 `historyTerm` 滚回缓存时，自动使用包含完整滚回历史的缓存副本。
+
+### 2026-10-14 — 修复 TUI 应用输出与 agy 底部内容裁切问题
 
 - 修复 Claude Code (Ink 渲染器) 等 TUI 应用在输出后内容不显示的问题。内容实际存在但未刷新到屏幕，调整窗口大小可以恢复显示。
 - 根本原因：某些 TUI 应用（如使用 Ink 的 Claude Code）可能缓冲输出而不立即刷新屏幕，等待某个触发事件（如 SIGWINCH）才完整重绘。

@@ -36,6 +36,7 @@ const state = {
   inputDraftTimer: null,
   viewportWidth: null,
   viewportHeight: null,
+  keyboardBaseHeight: null,
   keyboardOpen: false,
   inputComposing: false,
   inputCompositionEndedAt: -Infinity,
@@ -435,6 +436,8 @@ function connectStream() {
     for (const view of terminalViews.values()) {
       view.serverActive = false;
       view.inputReady = false;
+      view.lastSentCols = 0;
+      view.lastSentRows = 0;
     }
     elements.connectionDot.classList.remove("online");
     resetSessionLatency();
@@ -589,6 +592,7 @@ function handleSessionMessage(message) {
   }
   if (message.type === "output") {
     view.liveOutputBytes += (message.data || "").length;
+    view.lastOutputAt = Date.now();
     view.term.write(message.data || "", () => {
       view.lastSeq = message.seq;
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
@@ -1014,7 +1018,8 @@ function ensureTerminalView(session) {
     historyGeneration: 0, cancelHistoryGestures: [],
     historyCapturedAt: null, historyFrozenAt: null, historyError: null,
     historyContent: "", historyNextBefore: null, historyHasEarlier: false, historyLoadingEarlier: false,
-    liveOutputBytes: 0, historyLiveBaseline: 0, inputReady: false,
+    liveOutputBytes: 0, lastOutputAt: 0, lastKeyboardLift: 0, lastSentCols: 0, lastSentRows: 0,
+    historyLiveBaseline: 0, inputReady: false,
   };
   terminalViews.set(session.slug, view);
   for (const eventName of ["pointerdown", "focusin"]) {
@@ -1044,7 +1049,11 @@ function ensureTerminalView(session) {
   });
   term.onResize(({ cols, rows }) => {
     term.options.scrollback = Math.max(200, rows * 9);
-    if (view.serverActive) streamSend({ type: "resize", session: view.slug, cols, rows });
+    if (view.serverActive && (cols !== view.lastSentCols || rows !== view.lastSentRows)) {
+      view.lastSentCols = cols;
+      view.lastSentRows = rows;
+      streamSend({ type: "resize", session: view.slug, cols, rows });
+    }
   });
   term.onScroll(() => updateTerminalStatus(view));
   term.onRender(() => {
@@ -1133,6 +1142,15 @@ function syncTerminalBottom(view) {
     // actual input/footer below it; that cursor must not veto the bottom lift.
     lift = Math.max(0, Math.min(screenHeight - available,
       (lastContentRow + 1) * rowHeight - available));
+    // Avoid single-frame downward lift drops while a TUI (e.g. agy) clears and
+    // redraws bottom rows across consecutive write chunks.
+    if (lift < (view.lastKeyboardLift || 0) && Date.now() - (view.lastOutputAt || 0) < 180) {
+      lift = Math.min(screenHeight - available, view.lastKeyboardLift);
+    } else {
+      view.lastKeyboardLift = lift;
+    }
+  } else {
+    view.lastKeyboardLift = 0;
   }
   // Preserve the PTY's rows/columns, but clip the TOP of its rendered screen.
   // Moving the xterm root also keeps its cursor, IME textarea and hit targets
@@ -1180,7 +1198,11 @@ function fitTerminal(view) {
         if (view.historyActive && view.historyGeneration === generation && view.historyTerm === terminal) terminal.scrollToLine(row);
       });
     }
-    if (view.serverActive) streamSend({ type: "resize", session: view.slug, cols: view.term.cols, rows: view.term.rows });
+    if (view.serverActive && (view.term.cols !== view.lastSentCols || view.term.rows !== view.lastSentRows)) {
+      view.lastSentCols = view.term.cols;
+      view.lastSentRows = view.term.rows;
+      streamSend({ type: "resize", session: view.slug, cols: view.term.cols, rows: view.term.rows });
+    }
   } catch {}
 }
 
@@ -1192,6 +1214,8 @@ function followKeyboardViewport() {
   if (keyboardViewportFrame !== null) cancelAnimationFrame(keyboardViewportFrame);
   let lastGeometry = "";
   let blurredAt = null;
+  const root = document.documentElement;
+  let currentShift = parseFloat(root.style.getPropertyValue("--app-keyboard-shift")) || 0;
   const tick = () => {
     const focused = mobileSessionInputFocused();
     if (focused) blurredAt = null;
@@ -1202,15 +1226,20 @@ function followKeyboardViewport() {
       lastGeometry = geometry;
       syncVisualViewport();
     }
-    // Always measure the uncorrected layout. Feeding last frame's compensation
-    // back into Safari's delayed geometry can retain or amplify an old lift.
-    const root = document.documentElement;
-    root.style.removeProperty("--app-keyboard-shift");
+    // Reconstruct the uncorrected composer bottom from currentShift instead of
+    // removing and re-adding --app-keyboard-shift on every 60fps animation frame.
     const bottom = (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight);
     const rect = elements.composer.getBoundingClientRect();
+    const uncorrectedBottom = rect.bottom + currentShift;
     const shift = !elements.composer.hidden && rect.height > 0
-      ? Math.max(0, rect.bottom - bottom) : 0;
-    if (shift > 1) root.style.setProperty("--app-keyboard-shift", `${shift}px`);
+      ? Math.max(0, Math.round(uncorrectedBottom - bottom)) : 0;
+    if (shift <= 1 && currentShift !== 0) {
+      root.style.removeProperty("--app-keyboard-shift");
+      currentShift = 0;
+    } else if (shift > 1 && Math.abs(shift - currentShift) > 1) {
+      root.style.setProperty("--app-keyboard-shift", `${shift}px`);
+      currentShift = shift;
+    }
     if (!focused && performance.now() - blurredAt > 800) {
       root.style.removeProperty("--app-keyboard-shift");
       keyboardViewportFrame = null;
@@ -1242,8 +1271,13 @@ function syncVisualViewport() {
   const height = Math.max(1, Math.round(viewport?.height || window.innerHeight));
   const previousHeight = state.viewportHeight || height;
   const widthChanged = state.viewportWidth !== null && Math.abs(measuredWidth - state.viewportWidth) > 2;
-  const keyboardOpening = !widthChanged && height < previousHeight - 60;
-  const keyboardClosing = state.keyboardOpen && !keyboardOpening && height > previousHeight + 60;
+  if (state.keyboardBaseHeight === null || widthChanged || (!state.keyboardOpen && height > state.keyboardBaseHeight)) {
+    state.keyboardBaseHeight = height;
+  }
+  const baseHeight = state.keyboardBaseHeight || previousHeight;
+  const keyboardOpening = !widthChanged && (height < previousHeight - 60 || height < baseHeight - 80);
+  const keyboardClosing = state.keyboardOpen && !keyboardOpening
+    && (height > previousHeight + 60 || height >= baseHeight - 40);
   // iOS may report a narrower visual viewport while the keyboard is visible.
   // Keep the layout width stable; only an actual browser/orientation resize may
   // establish a new width.
@@ -1251,6 +1285,7 @@ function syncVisualViewport() {
     state.viewportWidth = measuredWidth;
   }
   state.keyboardOpen = keyboardOpening || (state.keyboardOpen && !keyboardClosing);
+  if (!state.keyboardOpen) state.keyboardBaseHeight = Math.max(state.keyboardBaseHeight || 0, height);
   if (!state.keyboardOpen && !composerHasFocus()) document.documentElement.style.removeProperty("--app-keyboard-shift");
   state.viewportHeight = height;
   document.documentElement.style.setProperty("--app-viewport-width", `${state.viewportWidth}px`);
@@ -1288,6 +1323,8 @@ function activateTerminalView(session) {
       view.sessionLatencyMs = null;
       view.sessionConnected = null;
       view.serverActive = true;
+      view.lastSentCols = view.term.cols;
+      view.lastSentRows = view.term.rows;
       streamSend({ type: "subscribe", session: view.slug, cols: view.term.cols, rows: view.term.rows });
     }
   });
@@ -1304,6 +1341,8 @@ function deactivateTerminalView(view) {
   view.panel.hidden = true;
   if (view.serverActive) streamSend({ type: "active", session: view.slug, active: false });
   view.serverActive = false;
+  view.lastSentCols = 0;
+  view.lastSentRows = 0;
 }
 
 function visibleSessions() {
@@ -1725,15 +1764,26 @@ function updateCopyText() {
   elements.copyTextFeedback.textContent = "长按文字选择并复制，也可以一键复制全部。";
 }
 
+function buildCopyTextSnapshot(view) {
+  const terminal = view.historyActive ? view.historyTerm : view.term;
+  const screen = terminalPlainText(terminal);
+  // Live xterm is attached to tmux's client alternate screen (\x1b[?1049h),
+  // which only holds 1 viewport of lines. When historyTerm already has cached
+  // tmux scrollback loaded, use it for the full "loaded" copy scope.
+  const loadedSource = (!view.historyActive && view.historyReady && view.historyTerm.buffer.active.length > view.term.buffer.active.length)
+    ? view.historyTerm
+    : terminal;
+  return {
+    screen,
+    loaded: terminalPlainText(loadedSource, { viewportOnly: false }),
+  };
+}
+
 function openCopyText(slug = state.targetSlug || state.activeSlug, snapshot = null) {
   const view = terminalViews.get(slug);
   if (!view?.visible) return showToast("请先打开一个 session", "error");
   if (view.historyOpening) return showToast("缓存正在加载，请稍后复制", "error");
-  const terminal = view.historyActive ? view.historyTerm : view.term;
-  copyTextSnapshot = snapshot || {
-    screen: terminalPlainText(terminal),
-    loaded: terminalPlainText(terminal, { viewportOnly: false }),
-  };
+  copyTextSnapshot = snapshot || buildCopyTextSnapshot(view);
   elements.copyTextContext.textContent = `${sessionLabel(getSession(slug))} · ${view.historyActive ? "历史缓存" : "实时屏幕"}的文字副本，打开后不再刷新。`;
   elements.copyTextScope.value = "screen";
   elements.copyTextScope.disabled = false;
@@ -1778,11 +1828,7 @@ elements.openCopyText.addEventListener("click", async () => {
     showHistorySelection(view, terminalPlainText(view.historyTerm));
     return;
   }
-  const terminal = view.historyActive ? view.historyTerm : view.term;
-  const snapshot = {
-    screen: terminalPlainText(terminal),
-    loaded: terminalPlainText(terminal, { viewportOnly: false }),
-  };
+  const snapshot = buildCopyTextSnapshot(view);
   if (!snapshot.screen.trim()) return showToast("当前屏幕没有可复制的文字");
   // Start clipboard access directly in the tap gesture, with locally available
   // rendered text. No server round trip or mouse-only selection is required.
@@ -2342,6 +2388,8 @@ setInterval(() => {
     if (!view.visible) continue;
     if (view.serverActive) streamSend({ type: "active", session: view.slug, active: false });
     view.serverActive = false;
+    view.lastSentCols = 0;
+    view.lastSentRows = 0;
     view.flowState = "闲置暂停 · 操作即恢复";
     updateTerminalStatus(view);
   }

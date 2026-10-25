@@ -202,6 +202,16 @@ async function runTmux(args, options = {}) {
 }
 
 async function captureSessionHistory(session, { before = 0 } = {}) {
+  const broker = terminalBrokers.get(session.name);
+  if (before === 0 && broker && !broker.closed && broker.lastResizeAt > 0) {
+    // agy (BubbleTea v2 InlineStrategy) debounces SIGWINCH by 150ms before
+    // emitting ClearScreen + FlushToScrollback. Avoid snapshotting mid-clear.
+    const sinceResizeMs = Date.now() - broker.lastResizeAt;
+    if (sinceResizeMs >= 0 && sinceResizeMs < 260) {
+      await new Promise((resolve) => setTimeout(resolve, 260 - sinceResizeMs));
+    }
+    await broker.waitUntilParsed();
+  }
   const target = `${exactTarget(session.name)}:`;
   const metadata = await runTmux([
     "display-message",
@@ -490,14 +500,16 @@ async function claimBrowserClient(payload = {}) {
   return result;
 }
 
-async function ensureTerminalBroker(session, cols = 100, rows = 30) {
+async function ensureTerminalBroker(session, cols, rows) {
   const current = terminalBrokers.get(session.name);
   if (current && !current.closed) {
-    current.resize(cols, rows);
+    if (cols !== undefined || rows !== undefined) current.resize(cols, rows);
     return current;
   }
   if (current) terminalBrokers.delete(session.name);
 
+  const initialCols = Math.max(2, Math.min(500, Number(cols) || 100));
+  const initialRows = Math.max(2, Math.min(200, Number(rows) || 30));
   await runTmux(["has-session", "-t", exactTarget(session.name)]);
   await configureAdaptiveWindowSize(session);
   const broker = new TerminalBroker({
@@ -506,8 +518,8 @@ async function ensureTerminalBroker(session, cols = 100, rows = 30) {
     tmuxArgs,
     exactTarget,
     exclusive: exclusiveTerminal,
-    cols,
-    rows,
+    cols: initialCols,
+    rows: initialRows,
     scrollbackPages: historyCachePages,
     idleTimeoutMs: terminalBrokerIdleMs,
     captureHistory: () => refreshSessionHistoryCache(session),
