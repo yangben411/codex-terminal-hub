@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, realpath, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +24,7 @@ try {
     cwd: root,
     env: { ...process.env, CODEX_TERMINAL_HOST: "127.0.0.1", CODEX_TERMINAL_PORT: "0",
       CODEX_TERMINAL_DEFAULT_CWD: directory, CODEX_TERMINAL_TMUX_SOCKET: socketName,
+      CODEX_TERMINAL_WORKSPACE_SAVE: "1", CODEX_TERMINAL_WORKSPACE_FILE: path.join(directory, "workspace.json"),
       CODEX_PATH: path.join(directory, "not-installed"), TMUX_PATH: tmuxPath },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -127,10 +128,17 @@ try {
   assert.equal(listed.sessions.find(item => item.slug === session.slug).windows, 2);
   assert.ok(!listed.sessions.some(item => item.name === "missing_cli"));
   const health = await request("/api/health");
+  assert.equal(health.workspacePersistence.ready, true);
+  const savedWorkspace = JSON.parse(await readFile(path.join(directory, "workspace.json"), "utf8"));
+  assert.equal(savedWorkspace.sessions.find(item => item.name === session.name).windows.length, 2);
+  assert.equal(savedWorkspace.sessions.find(item => item.name === session.name).displayName, "工作终端");
   assert.ok(health.terminalBrokers.some(item => item.session === session.name));
   assert.ok(!("ttyd" in health));
   socket.close();
   for (const item of [session, duplicate.session]) await request(`/api/sessions/${item.slug}`, null, "DELETE");
+  const afterDelete = JSON.parse(await readFile(path.join(directory, "workspace.json"), "utf8"));
+  assert.ok(!afterDelete.sessions.some(item => [session.name, duplicate.session.name].includes(item.name)),
+    "explicit session deletion must immediately update the persisted workspace");
   console.log("Smoke passed: isolated server, directory completion, Chinese names, labels, windows, WebSocket input/render ACK, RTT, history and deletion.");
 } finally {
   socket?.terminate();

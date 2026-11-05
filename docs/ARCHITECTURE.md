@@ -2,13 +2,14 @@
 
 浏览器的 xterm.js 通过一条 WebSocket 连接 Node HTTP 服务。Node 为每个已打开的 session 建立 node-pty，由 PTY 执行 `tmux attach-session`。Tailscale Serve 在前面提供 tailnet 内 HTTPS/WSS 入口；本应用不调用 Tailscale 管理 API。
 
-## 三种不同的数据
+## 不同的数据与生命周期
 
 | 数据 | 位置 | 生命周期 |
 | --- | --- | --- |
 | Shell/CLI 进程和 tmux 保留历史 | 服务用户的 tmux server | 网页/Hub 断开后仍在；session 被终止或主机重启则不保证保留 |
 | 实时画面、渲染重放和历史快照 | Node 内存和浏览器内存 | 重连可从 tmux / headless xterm 恢复当前画面；不是磁盘存档 |
 | 最近 3 条输入、未发送草稿 | 当前来源的浏览器 localStorage | 通常跨刷新保留；清除网站数据会删除，不跨域名或设备同步 |
+| 会话、窗口、分屏和目录 | `.local/tmux-workspace*.json` | 默认每 60 秒保存，启动时 tmux 为空则重建 Shell；不保存或重启旧程序 |
 
 显示标签写在 tmux session 的 `@codex_web_display_name` 选项中，因此各设备看到一致的标签，但不改变 session 实际名称。没有应用数据库，没有把整个 Codex 会话目录读入或上传的机制。
 

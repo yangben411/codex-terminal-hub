@@ -8,6 +8,7 @@ import { renderStyledTerminal } from "./terminal-styled-text.js";
 import { HistorySelectionGuard, initialTextSelection } from "./history-selection-guard.js";
 import { GestureClipboard } from "./gesture-clipboard.js";
 import { InputDelivery } from "./input-delivery.js";
+import { connectionFailure } from "./connection-health.js";
 import "@xterm/xterm/css/xterm.css";
 
 const state = {
@@ -417,8 +418,10 @@ function connectStream() {
   resetSessionLatency();
   const socket = new WebSocket(streamUrl());
   state.stream = socket;
+  state.streamStartedAt = Date.now();
+  state.streamPongAt = 0;
   socket.addEventListener("open", () => {
-    state.streamAttempt = 0;
+    if (state.stream !== socket) return;
     elements.connectionDot.classList.add("online");
     updateComposerConnection();
   });
@@ -432,6 +435,7 @@ function connectStream() {
   });
   socket.addEventListener("close", (event) => {
     if (state.stream !== socket) return;
+    inputDelivery.fail();
     state.streamReady = false;
     for (const view of terminalViews.values()) {
       view.serverActive = false;
@@ -453,6 +457,30 @@ function connectStream() {
   });
 }
 
+function checkStreamHealth() {
+  if (!state.clientActive || document.hidden) return;
+  if (!state.stream) {
+    if (!state.streamTimer) connectStream();
+    return;
+  }
+  const failure = connectionFailure({
+    now: Date.now(), startedAt: state.streamStartedAt, ready: state.streamReady,
+    pongAt: state.streamPongAt, subscriptions: [...terminalViews.values()],
+  });
+  if (!failure) return;
+  // Retire the old socket immediately: Safari may never deliver its close event.
+  // Never replay input whose delivery is uncertain.
+  inputDelivery.fail();
+  closeStream(false);
+  elements.connectionDot.classList.remove("online");
+  const delay = Math.min(10000, 500 * (2 ** Math.min(state.streamAttempt++, 5)));
+  showToast(`${failure}，正在重新连接`, "error");
+  state.streamTimer = setTimeout(() => {
+    state.streamTimer = null;
+    connectStream();
+  }, delay);
+}
+
 function closeStream(clearClient = true) {
   tmuxClipboard.cancel();
   tmuxCopyGesture = null;
@@ -466,6 +494,8 @@ function closeStream(clearClient = true) {
   for (const view of terminalViews.values()) {
     view.serverActive = false;
     view.inputReady = false;
+    view.lastSentCols = 0;
+    view.lastSentRows = 0;
   }
   resetSessionLatency();
   updateComposerConnection();
@@ -520,6 +550,8 @@ function handleStreamMessage(message) {
     return;
   }
   if (message.type === "pong") {
+    state.streamPongAt = Date.now();
+    state.streamAttempt = 0;
     return;
   }
   if (message.type === "ready") {
@@ -574,10 +606,12 @@ function handleSessionMessage(message) {
     return;
   }
   if (message.type === "snapshot") {
+    const sourceSocket = state.stream;
     view.flowState = "同步缓存";
     updateTerminalStatus(view);
     view.term.reset();
     view.term.write(message.data || "", () => {
+      if (state.stream !== sourceSocket || !view.serverActive) return;
       view.lastSeq = message.seq;
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
       view.flowState = "实时";
@@ -591,9 +625,11 @@ function handleSessionMessage(message) {
     return;
   }
   if (message.type === "output") {
+    const sourceSocket = state.stream;
     view.liveOutputBytes += (message.data || "").length;
     view.lastOutputAt = Date.now();
     view.term.write(message.data || "", () => {
+      if (state.stream !== sourceSocket || !view.serverActive) return;
       view.lastSeq = message.seq;
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
       if (!view.historyActive) view.term.scrollToBottom();
@@ -1323,6 +1359,7 @@ function activateTerminalView(session) {
       view.sessionLatencyMs = null;
       view.sessionConnected = null;
       view.serverActive = true;
+      view.subscriptionStartedAt = Date.now();
       view.lastSentCols = view.term.cols;
       view.lastSentRows = view.term.rows;
       streamSend({ type: "subscribe", session: view.slug, cols: view.term.cols, rows: view.term.rows });
@@ -2351,7 +2388,9 @@ document.addEventListener("visibilitychange", () => {
   state.lastActivityAt = Date.now();
   if (document.hidden) flushInputDraft();
   heartbeat();
+  if (!document.hidden) checkStreamHealth();
 });
+window.addEventListener("online", checkStreamHealth);
 // Browser chrome, app switching and tab visibility are not an explicit request
 // to leave history. Only page controls / the live button resume live output.
 window.addEventListener("resize", syncVisualViewport, { passive: true });
@@ -2367,6 +2406,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 setInterval(heartbeat, 3000);
+setInterval(checkStreamHealth, 1000);
 setInterval(() => { if (state.streamReady) streamSend({ type: "ping", clientAt: Date.now() }); }, 5000);
 setInterval(() => {
   for (const view of terminalViews.values()) if (view.visible) updateTerminalStatus(view);

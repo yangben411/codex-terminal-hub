@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
 // Hooks only exist in this in-memory test bundle, never in public/terminal.js.
 const compiled = await build({
-  stdin: { contents: source + "\nwindow.hubTest = { terminalViews, openHistoryCache, returnToLive, loadEarlierHistory, fitTerminal };", resolveDir: `${root}/src`, loader: "js" },
+  stdin: { contents: source + "\nwindow.hubTest = { state, checkStreamHealth, inputDelivery, terminalViews, openHistoryCache, returnToLive, loadEarlierHistory, fitTerminal };", resolveDir: `${root}/src`, loader: "js" },
   bundle: true, format: "esm", platform: "browser", write: false, outfile: "terminal.js",
 });
 let earlierRequests = 0, historyRequests = 0;
@@ -493,6 +493,38 @@ try {
   assert.equal(await page.locator(".composer-session-name").isVisible(), true, "desktop retains the target name");
   assert.equal(await page.locator("#windowStrip").isVisible(), true, "desktop retains window strip");
   assert.equal(await page.locator("#newWindowButton").isVisible(), true, "desktop retains new window control");
+  // Simulate Safari sockets that never dispatch close: the watchdog must
+  // replace them, re-subscribe, and never replay an unacknowledged input.
+  for (const failure of ["handshake", "heartbeat", "snapshot"]) {
+    await page.evaluate((failure) => {
+      const { state, terminalViews, checkStreamHealth, inputDelivery } = hubTest;
+      const view = [...terminalViews.values()][0];
+      window.__oldSocket = state.stream;
+      window.__inputCountBeforeRecovery = (window.__hubInputs || []).length;
+      window.__hubHoldAck = true;
+      inputDelivery.submit("uncertain-delivery", view.slug);
+      inputDelivery.flush(view.slug, true);
+      if (failure === "handshake") {
+        state.streamReady = false;
+        state.streamStartedAt = Date.now() - 13000;
+        state.stream.readyState = WebSocket.CONNECTING;
+      } else if (failure === "heartbeat") state.streamPongAt = Date.now() - 16000;
+      else {
+        view.inputReady = false;
+        view.subscriptionStartedAt = Date.now() - 16000;
+      }
+      checkStreamHealth();
+      if (inputDelivery.job) throw new Error("uncertain input must be stopped");
+    }, failure);
+    await page.waitForFunction(() => hubTest.state.stream && hubTest.state.stream !== window.__oldSocket
+      && [...hubTest.terminalViews.values()][0].inputReady);
+    assert.equal(await page.evaluate(() => window.__hubInputs.length - window.__inputCountBeforeRecovery), 1, "recovery must not resend input");
+    await page.evaluate(() => {
+      window.__oldSocket.message({ type: "snapshot", session: [...hubTest.terminalViews.keys()][0], seq: 999, data: "STALE" });
+      window.__hubHoldAck = false;
+    });
+    assert.notEqual(await page.evaluate(() => [...hubTest.terminalViews.values()][0].lastSeq), 999, "retired socket cannot overwrite current screen");
+  }
   assert.deepEqual(errors, []);
   console.log("Mobile regression passed: stable history prepend/reflow/background output, blur retention, gesture-only pagination, stale response discard, keyboard viewport containment, no overlap, input ACK, cancelled touch momentum, desktop layout.");
 } finally {
