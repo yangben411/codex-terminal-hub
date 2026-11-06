@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
 // Hooks only exist in this in-memory test bundle, never in public/terminal.js.
 const compiled = await build({
-  stdin: { contents: source + "\nwindow.hubTest = { state, checkStreamHealth, inputDelivery, terminalViews, openHistoryCache, returnToLive, loadEarlierHistory, fitTerminal };", resolveDir: `${root}/src`, loader: "js" },
+  stdin: { contents: source + "\nwindow.hubTest = { state, resumeForeground, heartbeat, getOrCreateClientId, checkStreamHealth, inputDelivery, terminalViews, openHistoryCache, returnToLive, loadEarlierHistory, fitTerminal };", resolveDir: `${root}/src`, loader: "js" },
   bundle: true, format: "esm", platform: "browser", write: false, outfile: "terminal.js",
 });
 let earlierRequests = 0, historyRequests = 0;
@@ -31,7 +31,7 @@ const server = http.createServer(async (request, response) => {
       lines: 160, capturedAt: historyRequests, nextBefore: historyRequests * 160, hasEarlier: true, pending: false });
   }
   if (url.pathname === "/api/sessions") return json({ sessions: [session], defaultCwd: "/tmp" });
-  if (url.pathname.startsWith("/api/")) return json({ active: true, phase: "live" });
+  if (url.pathname.startsWith("/api/")) return json({ active: true, occupied: true, phase: "live" });
   if (url.pathname === "/terminal.js") {
     response.setHeader("Content-Type", "text/javascript");
     return response.end(compiled.outputFiles.find(file => file.path.endsWith(".js")).text);
@@ -525,6 +525,37 @@ try {
     });
     assert.notEqual(await page.evaluate(() => [...hubTest.terminalViews.values()][0].lastSeq), 999, "retired socket cannot overwrite current screen");
   }
+  await page.evaluate(async () => {
+    const { state, terminalViews, resumeForeground, getOrCreateClientId } = hubTest;
+    const id = state.clientId;
+    window.name = "";
+    if (getOrCreateClientId() !== id) throw new Error("session storage must preserve identity when window.name is lost");
+    state.idleSuspended = true;
+    for (const view of terminalViews.values()) { view.serverActive = false; view.inputReady = false; }
+    await resumeForeground();
+    if (state.idleSuspended) throw new Error("foreground recovery must leave idle suspension without a touch");
+  });
+  await page.waitForFunction(() => [...hubTest.terminalViews.values()][0].inputReady);
+  // An earlier heartbeat response must not undo a later successful resume.
+  let releaseHeartbeat;
+  await page.route("**/api/client/heartbeat", async route => {
+    await new Promise(resolve => { releaseHeartbeat = resolve; });
+    await route.fulfill({ json: { active: false, occupied: true, phase: "live" } });
+  });
+  await page.evaluate(() => { window.__pendingHeartbeat = hubTest.heartbeat(); });
+  while (!releaseHeartbeat) await new Promise(resolve => setTimeout(resolve, 10));
+  await page.evaluate(() => hubTest.resumeForeground());
+  releaseHeartbeat();
+  await page.evaluate(() => window.__pendingHeartbeat);
+  assert.equal(await page.evaluate(() => hubTest.state.clientActive), true, "stale heartbeat cannot revoke recovered ownership");
+  await page.unroute("**/api/client/heartbeat");
+  await page.route("**/api/client/claim", route => route.fulfill({ json: { active: false, occupied: true, phase: "live" } }));
+  assert.equal(await page.evaluate(() => hubTest.resumeForeground()), false);
+  assert.equal(await page.evaluate(() => hubTest.state.clientActive), false, "newer owner requires manual reconnect");
+  assert.equal(await page.evaluate(() => hubTest.state.stream), null);
+  await page.unroute("**/api/client/claim");
+  await page.evaluate(() => hubTest.resumeForeground());
+  await page.waitForFunction(() => [...hubTest.terminalViews.values()][0].inputReady);
   assert.deepEqual(errors, []);
   console.log("Mobile regression passed: stable history prepend/reflow/background output, blur retention, gesture-only pagination, stale response discard, keyboard viewport containment, no overlap, input ACK, cancelled touch momentum, desktop layout.");
 } finally {

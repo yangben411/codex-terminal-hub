@@ -466,6 +466,7 @@ async function claimBrowserClient(payload = {}) {
   let result;
   const operation = clientClaimQueue.then(async () => {
     if (activeClientId && activeClientId !== clientId && !force) {
+      log("browser resume denied", `client=${clientId.slice(0, 8)} owner=${activeClientId.slice(0, 8)}`);
       result = {
         ...clientPresenceSnapshot(clientId),
         claimed: false,
@@ -489,6 +490,7 @@ async function claimBrowserClient(payload = {}) {
       }
       log("browser claimed", clientId.slice(0, 8));
     }
+    if (payload.reason === "foreground") log("browser resumed", `client=${clientId.slice(0, 8)} inherited=${!changed}`);
     result = {
       ...clientPresenceSnapshot(clientId),
       claimed: true,

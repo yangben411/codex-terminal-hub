@@ -51,6 +51,15 @@ try {
   assert.equal((await fetch(`${base}/api/directories`)).status, 400);
   const claim = await request("/api/client/claim", { clientId, visible: true, focused: true });
   assert.equal(claim.active, true);
+  assert.equal((await request("/api/client/claim", { clientId, reason: "foreground" })).active, true,
+    "same page inherits ownership without force");
+  const otherClient = `${clientId}_other`;
+  assert.equal((await request("/api/client/claim", { clientId: otherClient })).active, false,
+    "new page cannot automatically steal control");
+  assert.equal((await request("/api/client/claim", { clientId: otherClient, force: true })).active, true);
+  assert.equal((await request("/api/client/claim", { clientId, reason: "foreground" })).active, false,
+    "old page cannot reclaim after a newer explicit takeover");
+  assert.equal((await request("/api/client/claim", { clientId, force: true })).active, true);
   assert.deepEqual((await request("/api/sessions")).sessions, [], "first run works without any tmux server");
   await runTmux("new-session", "-d", "-s", "fixture", "/bin/bash --noprofile --norc");
   await runTmux("set-option", "-g", "default-shell", "/bin/bash");

@@ -316,18 +316,24 @@ function createClientId() {
 }
 
 function getOrCreateClientId() {
+  const key = "codex-terminal-page-id";
+  const valid = (value) => /^[A-Za-z0-9_-]{16,128}$/.test(value || "");
+  let stored;
+  try { stored = sessionStorage.getItem(key); } catch {}
+  // Tab-scoped storage survives reload/restore without sharing ownership
+  // across all tabs as localStorage would.
+  if (valid(stored)) return stored;
+  let id = createClientId();
   try {
     const prefix = "codex-terminal-hub:";
     if (window.name.startsWith(prefix)) {
-      const stored = window.name.slice(prefix.length);
-      if (/^[A-Za-z0-9_-]{16,128}$/.test(stored)) return stored;
+      const previous = window.name.slice(prefix.length);
+      if (valid(previous)) id = previous;
     }
-    const id = createClientId();
     window.name = `${prefix}${id}`;
-    return id;
-  } catch {
-    return createClientId();
-  }
+  } catch {}
+  try { sessionStorage.setItem(key, id); } catch {}
+  return id;
 }
 
 function telemetry() {
@@ -363,38 +369,85 @@ function showTakeover(status) {
   updateComposerConnection();
 }
 
-async function claimBrowser({ force = false } = {}) {
-  const result = await api("/api/client/claim", {
-    method: "POST",
-    body: JSON.stringify({ clientId: state.clientId, force, ...telemetry() }),
-  });
-  state.clientStatus = result;
-  if (!result.active) {
-    showTakeover(result);
+let claimEpoch = 0;
+let claimPending = 0;
+let foregroundRecovery = null;
+let foregroundRecoveryNeeded = false;
+
+async function claimBrowser({ force = false, reason = "open" } = {}) {
+  const epoch = ++claimEpoch;
+  claimPending++;
+  try {
+    const result = await api("/api/client/claim", {
+      method: "POST",
+      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ clientId: state.clientId, force, reason, ...telemetry() }),
+    });
+    if (epoch !== claimEpoch) return false;
+    state.clientStatus = result;
+    if (!result.active) {
+      showTakeover(result);
+      return false;
+    }
+    state.clientActive = true;
+    elements.clientTakeover.hidden = true;
+    elements.connectionDot.classList.add("online");
+    elements.connectionDot.title = "控制连接已建立";
+    connectStream();
+    updateComposerConnection();
+    return true;
+  } finally { claimPending--; }
+}
+
+function resumeForeground() {
+  if (document.hidden || !state.clientId || claimPending) return Promise.resolve(false);
+  if (foregroundRecovery) return foregroundRecovery;
+  foregroundRecoveryNeeded = true;
+  foregroundRecovery = (async () => {
+    // A non-forced claim is accepted only for the current owner or an empty
+    // server. Never steal ownership back from a newer manually claimed page.
+    const accepted = await claimBrowser({ reason: "foreground" });
+    foregroundRecoveryNeeded = false;
+    if (!accepted) return false;
+    markActivity();
+    checkStreamHealth();
+    syncVisibleTerminals();
+    if (!state.sessions.length) {
+      await refreshSessions();
+      const requested = new URLSearchParams(location.search).get("session");
+      if (requested && getSession(requested)) openSession(requested);
+    }
+    return true;
+  })().catch(() => {
+    // A failed foreground request is retried by subsequent heartbeats.
+    foregroundRecoveryNeeded = true;
+    elements.connectionDot.classList.remove("online");
     return false;
-  }
-  state.clientActive = true;
-  elements.clientTakeover.hidden = true;
-  elements.connectionDot.classList.add("online");
-  elements.connectionDot.title = "控制连接已建立";
-  connectStream();
-  updateComposerConnection();
-  return true;
+  }).finally(() => { foregroundRecovery = null; });
+  return foregroundRecovery;
 }
 
 async function heartbeat() {
-  if (!state.clientId) return;
+  if (!state.clientId || claimPending) return;
+  const epoch = claimEpoch;
   try {
     const status = await api("/api/client/heartbeat", {
       method: "POST",
+      signal: AbortSignal.timeout(8000),
       body: JSON.stringify({ clientId: state.clientId, ...telemetry() }),
     });
+    if (epoch !== claimEpoch || claimPending) return;
+    if (!document.hidden && (!status.occupied || foregroundRecoveryNeeded || (status.active && !state.clientActive))) {
+      await resumeForeground();
+      return;
+    }
     if (!status.active && state.clientActive) showTakeover(status);
     else if (!state.clientActive) {
       state.clientStatus = status;
       elements.clientPresenceLabel.textContent = presenceLabel(status);
     }
   } catch {
+    if (epoch !== claimEpoch || claimPending) return;
     elements.connectionDot.classList.remove("online");
     updateComposerConnection();
   }
@@ -458,7 +511,7 @@ function connectStream() {
 }
 
 function checkStreamHealth() {
-  if (!state.clientActive || document.hidden) return;
+  if (!state.clientActive || document.hidden || claimPending) return;
   if (!state.stream) {
     if (!state.streamTimer) connectStream();
     return;
@@ -1557,7 +1610,7 @@ function openMulti(slugs) {
 async function refreshSessions({ quiet = false } = {}) {
   if (!state.clientActive) return;
   try {
-    const data = await api("/api/sessions");
+    const data = await api("/api/sessions", { signal: AbortSignal.timeout(8000) });
     state.sessions = data.sessions;
     state.defaultCwd = data.defaultCwd;
     const valid = new Set(state.sessions.map((session) => session.slug));
@@ -2385,12 +2438,11 @@ for (const name of ["pointerdown", "keydown", "touchstart"]) {
   window.addEventListener(name, markActivity, { passive: true });
 }
 document.addEventListener("visibilitychange", () => {
-  state.lastActivityAt = Date.now();
-  if (document.hidden) flushInputDraft();
-  heartbeat();
-  if (!document.hidden) checkStreamHealth();
+  if (document.hidden) { flushInputDraft(); heartbeat(); }
+  else resumeForeground();
 });
-window.addEventListener("online", checkStreamHealth);
+window.addEventListener("pageshow", resumeForeground);
+window.addEventListener("online", resumeForeground);
 // Browser chrome, app switching and tab visibility are not an explicit request
 // to leave history. Only page controls / the live button resume live output.
 window.addEventListener("resize", syncVisualViewport, { passive: true });
