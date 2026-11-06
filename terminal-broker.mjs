@@ -66,6 +66,7 @@ export class TerminalBroker {
     this.idleTimer = null;
     this.startedAt = 0;
     this.lastOutputAt = 0;
+    this.lastResizeAt = 0;
     this.terminalResponses = 0;
     this.closed = false;
     this.startPromise = null;
@@ -226,6 +227,7 @@ export class TerminalBroker {
     if (nextCols === this.cols && nextRows === this.rows) return;
     this.cols = nextCols;
     this.rows = nextRows;
+    this.lastResizeAt = Date.now();
     this.terminal.options.scrollback = Math.max(500, nextRows * this.scrollbackPages);
     this.terminal.resize(nextCols, nextRows);
     if (this.pty && !this.closed) this.pty.resize(nextCols, nextRows);

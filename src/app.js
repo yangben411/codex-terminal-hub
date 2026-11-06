@@ -4,8 +4,11 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { isBareTerminalProtocolArtifact, isTerminalProtocolReply } from "./terminal-protocol.js";
 import { terminalPlainText } from "./terminal-text.js";
+import { renderStyledTerminal } from "./terminal-styled-text.js";
+import { HistorySelectionGuard, initialTextSelection } from "./history-selection-guard.js";
 import { GestureClipboard } from "./gesture-clipboard.js";
 import { InputDelivery } from "./input-delivery.js";
+import { connectionFailure } from "./connection-health.js";
 import "@xterm/xterm/css/xterm.css";
 
 const state = {
@@ -34,6 +37,7 @@ const state = {
   inputDraftTimer: null,
   viewportWidth: null,
   viewportHeight: null,
+  keyboardBaseHeight: null,
   keyboardOpen: false,
   inputComposing: false,
   inputCompositionEndedAt: -Infinity,
@@ -61,7 +65,7 @@ const elements = Object.fromEntries([
   "openTerminalTab", "overviewView", "terminalView", "emptyView", "sessionCount",
   "sessionGrid", "openSelectedMulti", "multiSelectionHint", "windowStrip", "terminalGrid",
   "composer", "composerToggle", "composerClose", "quickKeys", "mobileDpad", "composerStatus",
-  "terminalInput", "sendInputButton", "mobileDirectionToggle", "newSessionDialog", "newSessionForm", "createSessionSubmit",
+  "terminalInput", "sendInputButton", "dismissKeyboard", "mobileDirectionToggle", "newSessionDialog", "newSessionForm", "createSessionSubmit",
   "newWindowDialog", "newWindowForm", "newWindowContext", "createWindowSubmit", "clientTakeover",
   "clientTakeoverEyebrow", "clientTakeoverTitle", "clientTakeoverMessage", "clientPresenceDot",
   "clientPresenceLabel", "reclaimClient", "toast",
@@ -312,18 +316,24 @@ function createClientId() {
 }
 
 function getOrCreateClientId() {
+  const key = "codex-terminal-page-id";
+  const valid = (value) => /^[A-Za-z0-9_-]{16,128}$/.test(value || "");
+  let stored;
+  try { stored = sessionStorage.getItem(key); } catch {}
+  // Tab-scoped storage survives reload/restore without sharing ownership
+  // across all tabs as localStorage would.
+  if (valid(stored)) return stored;
+  let id = createClientId();
   try {
     const prefix = "codex-terminal-hub:";
     if (window.name.startsWith(prefix)) {
-      const stored = window.name.slice(prefix.length);
-      if (/^[A-Za-z0-9_-]{16,128}$/.test(stored)) return stored;
+      const previous = window.name.slice(prefix.length);
+      if (valid(previous)) id = previous;
     }
-    const id = createClientId();
     window.name = `${prefix}${id}`;
-    return id;
-  } catch {
-    return createClientId();
-  }
+  } catch {}
+  try { sessionStorage.setItem(key, id); } catch {}
+  return id;
 }
 
 function telemetry() {
@@ -359,38 +369,85 @@ function showTakeover(status) {
   updateComposerConnection();
 }
 
-async function claimBrowser({ force = false } = {}) {
-  const result = await api("/api/client/claim", {
-    method: "POST",
-    body: JSON.stringify({ clientId: state.clientId, force, ...telemetry() }),
-  });
-  state.clientStatus = result;
-  if (!result.active) {
-    showTakeover(result);
+let claimEpoch = 0;
+let claimPending = 0;
+let foregroundRecovery = null;
+let foregroundRecoveryNeeded = false;
+
+async function claimBrowser({ force = false, reason = "open" } = {}) {
+  const epoch = ++claimEpoch;
+  claimPending++;
+  try {
+    const result = await api("/api/client/claim", {
+      method: "POST",
+      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ clientId: state.clientId, force, reason, ...telemetry() }),
+    });
+    if (epoch !== claimEpoch) return false;
+    state.clientStatus = result;
+    if (!result.active) {
+      showTakeover(result);
+      return false;
+    }
+    state.clientActive = true;
+    elements.clientTakeover.hidden = true;
+    elements.connectionDot.classList.add("online");
+    elements.connectionDot.title = "控制连接已建立";
+    connectStream();
+    updateComposerConnection();
+    return true;
+  } finally { claimPending--; }
+}
+
+function resumeForeground() {
+  if (document.hidden || !state.clientId || claimPending) return Promise.resolve(false);
+  if (foregroundRecovery) return foregroundRecovery;
+  foregroundRecoveryNeeded = true;
+  foregroundRecovery = (async () => {
+    // A non-forced claim is accepted only for the current owner or an empty
+    // server. Never steal ownership back from a newer manually claimed page.
+    const accepted = await claimBrowser({ reason: "foreground" });
+    foregroundRecoveryNeeded = false;
+    if (!accepted) return false;
+    markActivity();
+    checkStreamHealth();
+    syncVisibleTerminals();
+    if (!state.sessions.length) {
+      await refreshSessions();
+      const requested = new URLSearchParams(location.search).get("session");
+      if (requested && getSession(requested)) openSession(requested);
+    }
+    return true;
+  })().catch(() => {
+    // A failed foreground request is retried by subsequent heartbeats.
+    foregroundRecoveryNeeded = true;
+    elements.connectionDot.classList.remove("online");
     return false;
-  }
-  state.clientActive = true;
-  elements.clientTakeover.hidden = true;
-  elements.connectionDot.classList.add("online");
-  elements.connectionDot.title = "控制连接已建立";
-  connectStream();
-  updateComposerConnection();
-  return true;
+  }).finally(() => { foregroundRecovery = null; });
+  return foregroundRecovery;
 }
 
 async function heartbeat() {
-  if (!state.clientId) return;
+  if (!state.clientId || claimPending) return;
+  const epoch = claimEpoch;
   try {
     const status = await api("/api/client/heartbeat", {
       method: "POST",
+      signal: AbortSignal.timeout(8000),
       body: JSON.stringify({ clientId: state.clientId, ...telemetry() }),
     });
+    if (epoch !== claimEpoch || claimPending) return;
+    if (!document.hidden && (!status.occupied || foregroundRecoveryNeeded || (status.active && !state.clientActive))) {
+      await resumeForeground();
+      return;
+    }
     if (!status.active && state.clientActive) showTakeover(status);
     else if (!state.clientActive) {
       state.clientStatus = status;
       elements.clientPresenceLabel.textContent = presenceLabel(status);
     }
   } catch {
+    if (epoch !== claimEpoch || claimPending) return;
     elements.connectionDot.classList.remove("online");
     updateComposerConnection();
   }
@@ -414,8 +471,10 @@ function connectStream() {
   resetSessionLatency();
   const socket = new WebSocket(streamUrl());
   state.stream = socket;
+  state.streamStartedAt = Date.now();
+  state.streamPongAt = 0;
   socket.addEventListener("open", () => {
-    state.streamAttempt = 0;
+    if (state.stream !== socket) return;
     elements.connectionDot.classList.add("online");
     updateComposerConnection();
   });
@@ -429,10 +488,13 @@ function connectStream() {
   });
   socket.addEventListener("close", (event) => {
     if (state.stream !== socket) return;
+    inputDelivery.fail();
     state.streamReady = false;
     for (const view of terminalViews.values()) {
       view.serverActive = false;
       view.inputReady = false;
+      view.lastSentCols = 0;
+      view.lastSentRows = 0;
     }
     elements.connectionDot.classList.remove("online");
     resetSessionLatency();
@@ -448,6 +510,30 @@ function connectStream() {
   });
 }
 
+function checkStreamHealth() {
+  if (!state.clientActive || document.hidden || claimPending) return;
+  if (!state.stream) {
+    if (!state.streamTimer) connectStream();
+    return;
+  }
+  const failure = connectionFailure({
+    now: Date.now(), startedAt: state.streamStartedAt, ready: state.streamReady,
+    pongAt: state.streamPongAt, subscriptions: [...terminalViews.values()],
+  });
+  if (!failure) return;
+  // Retire the old socket immediately: Safari may never deliver its close event.
+  // Never replay input whose delivery is uncertain.
+  inputDelivery.fail();
+  closeStream(false);
+  elements.connectionDot.classList.remove("online");
+  const delay = Math.min(10000, 500 * (2 ** Math.min(state.streamAttempt++, 5)));
+  showToast(`${failure}，正在重新连接`, "error");
+  state.streamTimer = setTimeout(() => {
+    state.streamTimer = null;
+    connectStream();
+  }, delay);
+}
+
 function closeStream(clearClient = true) {
   tmuxClipboard.cancel();
   tmuxCopyGesture = null;
@@ -461,6 +547,8 @@ function closeStream(clearClient = true) {
   for (const view of terminalViews.values()) {
     view.serverActive = false;
     view.inputReady = false;
+    view.lastSentCols = 0;
+    view.lastSentRows = 0;
   }
   resetSessionLatency();
   updateComposerConnection();
@@ -515,6 +603,8 @@ function handleStreamMessage(message) {
     return;
   }
   if (message.type === "pong") {
+    state.streamPongAt = Date.now();
+    state.streamAttempt = 0;
     return;
   }
   if (message.type === "ready") {
@@ -545,7 +635,10 @@ function completeComposerInput(pending) {
   }
   const session = getSession(pending.sessionSlug);
   showToast(`已发送到 ${sessionLabel(session)}`);
-  elements.terminalInput.focus({ preventScroll: true });
+  // A late ACK must not reopen a keyboard the user has already dismissed.
+  if ([elements.terminalInput, elements.sendInputButton].includes(document.activeElement)) {
+    elements.terminalInput.focus({ preventScroll: true });
+  }
   updateComposerConnection();
 }
 
@@ -566,10 +659,12 @@ function handleSessionMessage(message) {
     return;
   }
   if (message.type === "snapshot") {
+    const sourceSocket = state.stream;
     view.flowState = "同步缓存";
     updateTerminalStatus(view);
     view.term.reset();
     view.term.write(message.data || "", () => {
+      if (state.stream !== sourceSocket || !view.serverActive) return;
       view.lastSeq = message.seq;
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
       view.flowState = "实时";
@@ -583,11 +678,15 @@ function handleSessionMessage(message) {
     return;
   }
   if (message.type === "output") {
+    const sourceSocket = state.stream;
     view.liveOutputBytes += (message.data || "").length;
+    view.lastOutputAt = Date.now();
     view.term.write(message.data || "", () => {
+      if (state.stream !== sourceSocket || !view.serverActive) return;
       view.lastSeq = message.seq;
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
       if (!view.historyActive) view.term.scrollToBottom();
+      if (state.keyboardOpen || mobileSessionInputFocused()) syncTerminalBottom(view);
       updateTerminalStatus(view);
     });
     return;
@@ -698,6 +797,7 @@ async function loadHistoryCache(view, { refresh = false } = {}) {
 }
 
 async function loadEarlierHistory(view) {
+  if (historyTextSelected(view)) return;
   if (!view.historyActive || view.historyOpening || view.historyLoadingEarlier || !view.historyHasEarlier || view.historyNextBefore === null || composerHasFocus()) return;
   const generation = view.historyGeneration;
   view.historyLoadingEarlier = true;
@@ -707,7 +807,7 @@ async function loadEarlierHistory(view) {
   try {
     const page = await api(`/api/sessions/${view.slug}/history?before=${encodeURIComponent(before)}`);
     // Discard responses from a reading session exited while the request ran.
-    if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus()) return;
+    if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus() || historyTextSelected(view)) return;
     if (!page?.content || !page.lines) {
       view.historyHasEarlier = false;
       view.historyNextBefore = null;
@@ -731,7 +831,7 @@ async function loadEarlierHistory(view) {
     try {
       ensureHistoryScrollback({ historyTerm: nextTerm }, content);
       await new Promise(resolve => nextTerm.write(content, resolve));
-      if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus()) return;
+      if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus() || historyTextSelected(view)) return;
       const oldTerm = view.historyTerm;
       const top = oldTerm.buffer.active.viewportY;
       const addedRows = nextTerm.buffer.active.length - oldTerm.buffer.active.length;
@@ -747,6 +847,7 @@ async function loadEarlierHistory(view) {
       view.historyRenderHost = stagingHost;
       stagingHost.style.cssText = "position:absolute;inset:0";
       installed = true;
+      refreshNativeHistory(view);
     } finally {
       if (!installed) { nextTerm.dispose(); stagingHost.remove(); }
     }
@@ -771,7 +872,7 @@ async function loadEarlierHistory(view) {
   }
 }
 
-async function openHistoryCache(view) {
+async function openHistoryCache(view, { native = true } = {}) {
   if (composerHasFocus() || !view.visible) return false;
   if (view.historyActive) return true;
   const generation = ++view.historyGeneration;
@@ -808,6 +909,9 @@ async function openHistoryCache(view) {
     view.historyTerm.scrollLines(-4);
     view.historyOpening = false;
     view.historyLayer.removeAttribute("aria-busy");
+    if (native && navigator.maxTouchPoints > 0 && window.matchMedia("(max-width: 900px)").matches) {
+      showHistorySelection(view, nativeHistoryText(view), { reader: true });
+    }
     updateTerminalStatus(view);
   });
   updateTerminalStatus(view);
@@ -1003,7 +1107,8 @@ function ensureTerminalView(session) {
     historyGeneration: 0, cancelHistoryGestures: [],
     historyCapturedAt: null, historyFrozenAt: null, historyError: null,
     historyContent: "", historyNextBefore: null, historyHasEarlier: false, historyLoadingEarlier: false,
-    liveOutputBytes: 0, historyLiveBaseline: 0, inputReady: false,
+    liveOutputBytes: 0, lastOutputAt: 0, lastKeyboardLift: 0, lastSentCols: 0, lastSentRows: 0,
+    historyLiveBaseline: 0, inputReady: false,
   };
   terminalViews.set(session.slug, view);
   for (const eventName of ["pointerdown", "focusin"]) {
@@ -1033,9 +1138,16 @@ function ensureTerminalView(session) {
   });
   term.onResize(({ cols, rows }) => {
     term.options.scrollback = Math.max(200, rows * 9);
-    if (view.serverActive) streamSend({ type: "resize", session: view.slug, cols, rows });
+    if (view.serverActive && (cols !== view.lastSentCols || rows !== view.lastSentRows)) {
+      view.lastSentCols = cols;
+      view.lastSentRows = rows;
+      streamSend({ type: "resize", session: view.slug, cols, rows });
+    }
   });
   term.onScroll(() => updateTerminalStatus(view));
+  term.onRender(() => {
+    if (state.keyboardOpen || mobileSessionInputFocused()) syncTerminalBottom(view);
+  });
   view.status.addEventListener("click", () => {
     if (view.historyActive) returnToLive(view);
     else openHistoryCache(view);
@@ -1085,9 +1197,50 @@ function syncTerminalBottom(view) {
   const padding = getComputedStyle(view.host);
   const available = Math.max(0, view.host.clientHeight
     - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom));
+  const availableWidth = Math.max(0, view.host.clientWidth
+    - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight));
+  const keyboardInput = state.keyboardOpen || mobileSessionInputFocused();
+  // Fit the existing columns using xterm's own font metrics, not CSS scale:
+  // xterm's mouse/selection coordinates do not compensate for a CSS transform.
+  // The input and footer remain in one grid; no PTY resize or line reflow.
+  if (keyboardInput && screen.offsetWidth > 0 && availableWidth > 0) {
+    view.keyboardFont ??= { size: view.term.options.fontSize, width: screen.offsetWidth };
+    const fontSize = Math.max(1, Math.min(view.keyboardFont.size,
+      Math.floor(view.keyboardFont.size * availableWidth / view.keyboardFont.width)));
+    if (view.term.options.fontSize !== fontSize) view.term.options.fontSize = fontSize;
+  } else if (!keyboardInput && view.keyboardFont) {
+    view.term.options.fontSize = view.keyboardFont.size;
+    view.keyboardFont = null;
+  }
   const screenHeight = screen.offsetHeight;
-  const lift = (state.keyboardOpen || mobileSessionInputFocused())
-    ? Math.max(0, screenHeight - available) : 0;
+  let lift = 0;
+  if (keyboardInput) {
+    const buffer = view.term.buffer.active;
+    const rowHeight = screenHeight / view.term.rows;
+    const cursorRow = Math.max(0, Math.min(view.term.rows - 1,
+      buffer.baseY + buffer.cursorY - buffer.viewportY));
+    let lastContentRow = cursorRow;
+    for (let row = view.term.rows - 1; row > cursorRow; row--) {
+      if (buffer.getLine(buffer.viewportY + row)?.translateToString(true).trim()) {
+        lastContentRow = row;
+        break;
+      }
+    }
+    // Anchor occupied rows, not the unused bottom of a sparse terminal. TUIs
+    // such as agy may park the protocol cursor at row 0 while rendering their
+    // actual input/footer below it; that cursor must not veto the bottom lift.
+    lift = Math.max(0, Math.min(screenHeight - available,
+      (lastContentRow + 1) * rowHeight - available));
+    // Avoid single-frame downward lift drops while a TUI (e.g. agy) clears and
+    // redraws bottom rows across consecutive write chunks.
+    if (lift < (view.lastKeyboardLift || 0) && Date.now() - (view.lastOutputAt || 0) < 180) {
+      lift = Math.min(screenHeight - available, view.lastKeyboardLift);
+    } else {
+      view.lastKeyboardLift = lift;
+    }
+  } else {
+    view.lastKeyboardLift = 0;
+  }
   // Preserve the PTY's rows/columns, but clip the TOP of its rendered screen.
   // Moving the xterm root also keeps its cursor, IME textarea and hit targets
   // in the same coordinate system. The composer retains its own grid row.
@@ -1106,7 +1259,8 @@ function fitTerminal(view) {
   try {
     syncTerminalBottom(view);
     view.fit.fit();
-    if (view.historyActive && !view.historyLoadingEarlier) {
+    syncTerminalBottom(view);
+    if (view.historyActive && !view.historyLoadingEarlier && !view.selectionLayer?.classList.contains("native-history-reader")) {
       const terminal = view.historyTerm;
       // Anchor the logical line, not distance from the changing bottom. Reflow
       // can change wrapped row counts when Safari's viewport changes size.
@@ -1133,7 +1287,11 @@ function fitTerminal(view) {
         if (view.historyActive && view.historyGeneration === generation && view.historyTerm === terminal) terminal.scrollToLine(row);
       });
     }
-    if (view.serverActive) streamSend({ type: "resize", session: view.slug, cols: view.term.cols, rows: view.term.rows });
+    if (view.serverActive && (view.term.cols !== view.lastSentCols || view.term.rows !== view.lastSentRows)) {
+      view.lastSentCols = view.term.cols;
+      view.lastSentRows = view.term.rows;
+      streamSend({ type: "resize", session: view.slug, cols: view.term.cols, rows: view.term.rows });
+    }
   } catch {}
 }
 
@@ -1145,8 +1303,10 @@ function followKeyboardViewport() {
   if (keyboardViewportFrame !== null) cancelAnimationFrame(keyboardViewportFrame);
   let lastGeometry = "";
   let blurredAt = null;
+  const root = document.documentElement;
+  let currentShift = parseFloat(root.style.getPropertyValue("--app-keyboard-shift")) || 0;
   const tick = () => {
-    const focused = document.activeElement === elements.terminalInput;
+    const focused = mobileSessionInputFocused();
     if (focused) blurredAt = null;
     else blurredAt ??= performance.now();
     const viewport = window.visualViewport;
@@ -1155,17 +1315,22 @@ function followKeyboardViewport() {
       lastGeometry = geometry;
       syncVisualViewport();
     }
-    // Safari can pan a focused input after its viewport event. Correct using
-    // the actual rendered bottom, including any previous correction, so the
-    // entire app follows the keyboard without moving the terminal's cursor.
-    const root = document.documentElement;
-    const previousShift = Number.parseFloat(root.style.getPropertyValue("--app-keyboard-shift")) || 0;
+    // Reconstruct the uncorrected composer bottom from currentShift instead of
+    // removing and re-adding --app-keyboard-shift on every 60fps animation frame.
     const bottom = (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight);
     const rect = elements.composer.getBoundingClientRect();
+    const uncorrectedBottom = rect.bottom + currentShift;
     const shift = !elements.composer.hidden && rect.height > 0
-      ? Math.max(0, rect.bottom + previousShift - bottom) : 0;
-    if (Math.abs(shift - previousShift) > 1) root.style.setProperty("--app-keyboard-shift", `${shift}px`);
+      ? Math.max(0, Math.round(uncorrectedBottom - bottom)) : 0;
+    if (shift <= 1 && currentShift !== 0) {
+      root.style.removeProperty("--app-keyboard-shift");
+      currentShift = 0;
+    } else if (shift > 1 && Math.abs(shift - currentShift) > 1) {
+      root.style.setProperty("--app-keyboard-shift", `${shift}px`);
+      currentShift = shift;
+    }
     if (!focused && performance.now() - blurredAt > 800) {
+      root.style.removeProperty("--app-keyboard-shift");
       keyboardViewportFrame = null;
       return;
     }
@@ -1195,8 +1360,13 @@ function syncVisualViewport() {
   const height = Math.max(1, Math.round(viewport?.height || window.innerHeight));
   const previousHeight = state.viewportHeight || height;
   const widthChanged = state.viewportWidth !== null && Math.abs(measuredWidth - state.viewportWidth) > 2;
-  const keyboardOpening = !widthChanged && height < previousHeight - 60;
-  const keyboardClosing = state.keyboardOpen && !keyboardOpening && height > previousHeight + 60;
+  if (state.keyboardBaseHeight === null || widthChanged || (!state.keyboardOpen && height > state.keyboardBaseHeight)) {
+    state.keyboardBaseHeight = height;
+  }
+  const baseHeight = state.keyboardBaseHeight || previousHeight;
+  const keyboardOpening = !widthChanged && (height < previousHeight - 60 || height < baseHeight - 80);
+  const keyboardClosing = state.keyboardOpen && !keyboardOpening
+    && (height > previousHeight + 60 || height >= baseHeight - 40);
   // iOS may report a narrower visual viewport while the keyboard is visible.
   // Keep the layout width stable; only an actual browser/orientation resize may
   // establish a new width.
@@ -1204,6 +1374,7 @@ function syncVisualViewport() {
     state.viewportWidth = measuredWidth;
   }
   state.keyboardOpen = keyboardOpening || (state.keyboardOpen && !keyboardClosing);
+  if (!state.keyboardOpen) state.keyboardBaseHeight = Math.max(state.keyboardBaseHeight || 0, height);
   if (!state.keyboardOpen && !composerHasFocus()) document.documentElement.style.removeProperty("--app-keyboard-shift");
   state.viewportHeight = height;
   document.documentElement.style.setProperty("--app-viewport-width", `${state.viewportWidth}px`);
@@ -1241,6 +1412,9 @@ function activateTerminalView(session) {
       view.sessionLatencyMs = null;
       view.sessionConnected = null;
       view.serverActive = true;
+      view.subscriptionStartedAt = Date.now();
+      view.lastSentCols = view.term.cols;
+      view.lastSentRows = view.term.rows;
       streamSend({ type: "subscribe", session: view.slug, cols: view.term.cols, rows: view.term.rows });
     }
   });
@@ -1257,6 +1431,8 @@ function deactivateTerminalView(view) {
   view.panel.hidden = true;
   if (view.serverActive) streamSend({ type: "active", session: view.slug, active: false });
   view.serverActive = false;
+  view.lastSentCols = 0;
+  view.lastSentRows = 0;
 }
 
 function visibleSessions() {
@@ -1434,7 +1610,7 @@ function openMulti(slugs) {
 async function refreshSessions({ quiet = false } = {}) {
   if (!state.clientActive) return;
   try {
-    const data = await api("/api/sessions");
+    const data = await api("/api/sessions", { signal: AbortSignal.timeout(8000) });
     state.sessions = data.sessions;
     state.defaultCwd = data.defaultCwd;
     const valid = new Set(state.sessions.map((session) => session.slug));
@@ -1473,34 +1649,85 @@ function showToast(message, type = "success") {
 
 let copyTextSnapshot = null;
 
+function historyTextSelected(view) {
+  if (view.historySelectionGuard?.blocked || view.selectionLayer?.querySelector("textarea:not([hidden])")) return true;
+  return historyDOMSelection(view);
+}
+
+function historyDOMSelection(view) {
+  const selection = window.getSelection();
+  return Boolean(view.selectionLayer && selection && !selection.isCollapsed
+    && view.selectionLayer.contains(selection.anchorNode));
+}
+
+function nativeHistoryText(view) {
+  const buffer = view.historyTerm.buffer.active;
+  return Array.from({ length: buffer.length }, (_, row) => buffer.getLine(row)?.translateToString(true) || "").join("\n");
+}
+
+function refreshNativeHistory(view) {
+  const layer = view.selectionLayer;
+  if (!layer?.classList.contains("native-history-reader") || historyTextSelected(view)) return;
+  const content = layer.querySelector("pre");
+  const previousHeight = content.scrollHeight;
+  const previousTop = content.scrollTop;
+  renderStyledTerminal(content, view.historyTerm);
+  content.scrollTop = previousTop + content.scrollHeight - previousHeight;
+}
+
 function closeHistorySelection(view) {
   if (!view.selectionLayer) return;
   const selection = window.getSelection();
   if (selection?.anchorNode && view.selectionLayer.contains(selection.anchorNode)) selection.removeAllRanges();
+  // Clean up event listeners
+  if (view.cleanupSelectionHandlers) {
+    view.cleanupSelectionHandlers();
+    view.cleanupSelectionHandlers = null;
+  }
   view.selectionLayer.remove();
   view.selectionLayer = null;
+  view.historySelectionGuard = null;
   view.panel.classList.remove("selecting-history");
 }
 
-function showHistorySelection(view, text) {
+function showHistorySelection(view, text, { reader = false } = {}) {
   if (view.selectionLayer) return;
   for (const cancel of view.cancelHistoryGestures) cancel();
   const layer = document.createElement("section");
   layer.className = "history-text-selection";
+  layer.classList.toggle("native-history-reader", reader);
   layer.setAttribute("aria-label", "历史屏幕文字选择");
   layer.innerHTML = `<div class="history-selection-actions">
     <button type="button" data-copy-selection>复制选中</button>
-    <button type="button" data-copy-screen>复制整屏</button>
-    <button type="button" data-close-selection>返回历史</button>
+    <button type="button" data-copy-screen>${reader ? "复制已加载" : "复制整屏"}</button>
+    <button type="button" data-native-select>系统选字</button>
+    <button type="button" data-close-selection>${reader ? "实时" : "返回历史"}</button>
     </div><p role="status">长按下方文字，拖动选择手柄，使用系统“复制”或“复制选中”。</p>
-    <pre tabindex="0" aria-label="可长按选择的历史文字"></pre>`;
+    <pre aria-label="可长按选择的历史文字"></pre>
+    <textarea class="history-native-input" readonly wrap="off" spellcheck="false" aria-label="系统文字选择" hidden></textarea>`;
   const content = layer.querySelector("pre");
+  const nativeInput = layer.querySelector("textarea");
   content.textContent = text;
+  if (reader) renderStyledTerminal(content, view.historyTerm);
   content.style.fontFamily = view.historyTerm.options.fontFamily;
   content.style.fontSize = `${view.historyTerm.options.fontSize}px`;
+  if (reader) {
+    // fit() can update rows before the renderer updates screen height. Measure
+    // a rendered row, never divide a stale screen height by the new row count.
+    const measured = view.historyTerm.element?.querySelector(".xterm-rows > div")?.getBoundingClientRect().height;
+    const rowHeight = measured >= view.historyTerm.options.fontSize
+      ? measured : view.historyTerm.options.fontSize * view.historyTerm.options.lineHeight;
+    content.style.lineHeight = `${rowHeight}px`;
+    content.style.color = terminalTheme.foreground;
+    content.style.backgroundColor = terminalTheme.background;
+  }
   const feedback = layer.querySelector("p");
   let selectedText = "";
   const rememberSelection = () => {
+    if (!nativeInput.hidden) {
+      selectedText = nativeInput.value.slice(nativeInput.selectionStart, nativeInput.selectionEnd);
+      return selectedText;
+    }
     const selection = window.getSelection();
     if (selection?.anchorNode && content.contains(selection.anchorNode)
       && selection.focusNode && content.contains(selection.focusNode)) selectedText = selection.toString();
@@ -1521,11 +1748,103 @@ function showHistorySelection(view, text) {
     }
   };
   layer.querySelector("[data-copy-selection]").addEventListener("click", () => copy(rememberSelection()));
-  layer.querySelector("[data-copy-screen]").addEventListener("click", () => copy(text));
-  layer.querySelector("[data-close-selection]").addEventListener("click", () => closeHistorySelection(view));
+  layer.querySelector("[data-copy-screen]").addEventListener("click", () => copy(content.textContent));
+  const nativeButton = layer.querySelector("[data-native-select]");
+  let originalTop = 0;
+  nativeButton.addEventListener("click", () => {
+    if (!nativeInput.hidden) {
+      nativeInput.hidden = true;
+      content.hidden = false;
+      content.scrollTop = originalTop;
+      nativeButton.textContent = "系统选字";
+      return;
+    }
+    originalTop = content.scrollTop;
+    nativeInput.value = content.textContent;
+    nativeInput.style.font = getComputedStyle(content).font;
+    const row = Math.floor(originalTop / parseFloat(getComputedStyle(content).lineHeight));
+    const initial = initialTextSelection(nativeInput.value, row);
+    content.hidden = true;
+    nativeInput.hidden = false;
+    nativeInput.focus({ preventScroll: true });
+    nativeInput.setSelectionRange(initial.start, initial.end);
+    nativeInput.scrollTop = initial.row * parseFloat(getComputedStyle(content).lineHeight);
+    nativeButton.textContent = "彩色浏览";
+    feedback.textContent = "已切到系统选字，可长按调整范围，或点“复制选中”。内容不会刷新。";
+  });
+  layer.querySelector("[data-close-selection]").addEventListener("click", () => reader ? returnToLive(view, { focus: false }) : closeHistorySelection(view));
   view.selectionLayer = layer;
   view.panel.classList.add("selecting-history");
   view.historyLayer.append(layer);
+  if (reader) {
+    const guard = new HistorySelectionGuard();
+    view.historySelectionGuard = guard;
+    const lineHeight = parseFloat(getComputedStyle(content).lineHeight);
+    content.scrollTop = view.historyTerm.buffer.active.viewportY * lineHeight;
+    
+    // Ensure content is always selectable and touchable
+    content.style.userSelect = "text";
+    content.style.webkitUserSelect = "text";
+    content.style.touchAction = "auto";
+    
+    const scrollHandler = () => {
+      view.historyTerm.scrollToLine(Math.floor(content.scrollTop / lineHeight));
+      if (content.scrollTop <= content.clientHeight * 2 && !historyTextSelected(view)) loadEarlierHistory(view);
+    };
+    content.addEventListener("scroll", scrollHandler, { passive: true });
+    
+    const pointerDownHandler = event => {
+      if (event.pointerType !== "touch") return;
+      guard.start(event.clientX, event.clientY, performance.now(), historyDOMSelection(view));
+    };
+    content.addEventListener("pointerdown", pointerDownHandler, { passive: true });
+    
+    const pointerMoveHandler = event => {
+      if (event.pointerType === "touch") guard.move(event.clientX, event.clientY, performance.now(), historyDOMSelection(view));
+    };
+    content.addEventListener("pointermove", pointerMoveHandler, { passive: true });
+    
+    const pointerCancelHandler = () => guard.cancel(historyDOMSelection(view));
+    content.addEventListener("pointercancel", pointerCancelHandler, { passive: true });
+    
+    // Touch events continue to describe physical contact after Safari cancels
+    // pointer delivery for native scrolling / long-press selection.
+    const touchStartHandler = event => {
+      const touch = event.touches[0];
+      if (touch) guard.start(touch.clientX, touch.clientY, performance.now(), historyDOMSelection(view));
+    };
+    content.addEventListener("touchstart", touchStartHandler, { passive: true });
+    
+    const touchMoveHandler = event => {
+      const touch = event.touches[0];
+      if (touch) guard.move(touch.clientX, touch.clientY, performance.now(), historyDOMSelection(view));
+    };
+    content.addEventListener("touchmove", touchMoveHandler, { passive: true });
+    
+    const endTouch = event => {
+      if (event.type === "pointerup" && event.pointerType !== "touch") return;
+      if (event.touches?.length) return;
+      if (event.type === "touchcancel") guard.cancel(historyDOMSelection(view));
+      guard.end(performance.now(), historyDOMSelection(view));
+      requestAnimationFrame(() => {
+        if (view.selectionLayer === layer && content.scrollTop <= content.clientHeight * 2 && !historyTextSelected(view)) loadEarlierHistory(view);
+      });
+    };
+    for (const type of ["pointerup", "touchend", "touchcancel"]) content.addEventListener(type, endTouch, { passive: true });
+    
+    // Store cleanup function for explicit removal
+    view.cleanupSelectionHandlers = () => {
+      content.removeEventListener("scroll", scrollHandler);
+      content.removeEventListener("pointerdown", pointerDownHandler);
+      content.removeEventListener("pointermove", pointerMoveHandler);
+      content.removeEventListener("pointercancel", pointerCancelHandler);
+      content.removeEventListener("touchstart", touchStartHandler);
+      content.removeEventListener("touchmove", touchMoveHandler);
+      for (const type of ["pointerup", "touchend", "touchcancel"]) content.removeEventListener(type, endTouch);
+    };
+    
+    feedback.textContent = "直接长按选字，可拖动手柄跨屏选择；选中期间暂停加载更早历史。";
+  }
 }
 
 function updateCopyText() {
@@ -1535,15 +1854,26 @@ function updateCopyText() {
   elements.copyTextFeedback.textContent = "长按文字选择并复制，也可以一键复制全部。";
 }
 
+function buildCopyTextSnapshot(view) {
+  const terminal = view.historyActive ? view.historyTerm : view.term;
+  const screen = terminalPlainText(terminal);
+  // Live xterm is attached to tmux's client alternate screen (\x1b[?1049h),
+  // which only holds 1 viewport of lines. When historyTerm already has cached
+  // tmux scrollback loaded, use it for the full "loaded" copy scope.
+  const loadedSource = (!view.historyActive && view.historyReady && view.historyTerm.buffer.active.length > view.term.buffer.active.length)
+    ? view.historyTerm
+    : terminal;
+  return {
+    screen,
+    loaded: terminalPlainText(loadedSource, { viewportOnly: false }),
+  };
+}
+
 function openCopyText(slug = state.targetSlug || state.activeSlug, snapshot = null) {
   const view = terminalViews.get(slug);
   if (!view?.visible) return showToast("请先打开一个 session", "error");
   if (view.historyOpening) return showToast("缓存正在加载，请稍后复制", "error");
-  const terminal = view.historyActive ? view.historyTerm : view.term;
-  copyTextSnapshot = snapshot || {
-    screen: terminalPlainText(terminal),
-    loaded: terminalPlainText(terminal, { viewportOnly: false }),
-  };
+  copyTextSnapshot = snapshot || buildCopyTextSnapshot(view);
   elements.copyTextContext.textContent = `${sessionLabel(getSession(slug))} · ${view.historyActive ? "历史缓存" : "实时屏幕"}的文字副本，打开后不再刷新。`;
   elements.copyTextScope.value = "screen";
   elements.copyTextScope.disabled = false;
@@ -1588,11 +1918,7 @@ elements.openCopyText.addEventListener("click", async () => {
     showHistorySelection(view, terminalPlainText(view.historyTerm));
     return;
   }
-  const terminal = view.historyActive ? view.historyTerm : view.term;
-  const snapshot = {
-    screen: terminalPlainText(terminal),
-    loaded: terminalPlainText(terminal, { viewportOnly: false }),
-  };
+  const snapshot = buildCopyTextSnapshot(view);
   if (!snapshot.screen.trim()) return showToast("当前屏幕没有可复制的文字");
   // Start clipboard access directly in the tap gesture, with locally available
   // rendered text. No server round trip or mouse-only selection is required.
@@ -2023,6 +2349,13 @@ elements.mobileDpad.addEventListener("click", (event) => {
 });
 elements.composerToggle.addEventListener("click", () => setComposer(true));
 elements.composerClose.addEventListener("click", () => setComposer(false));
+elements.dismissKeyboard.addEventListener("pointerdown", event => event.preventDefault());
+elements.dismissKeyboard.addEventListener("click", () => {
+  document.activeElement?.blur();
+  elements.mobileDirectionToggle.closest(".mobile-control-deck").classList.remove("controls-open");
+  elements.mobileDirectionToggle.setAttribute("aria-expanded", "false");
+  syncVisualViewport();
+});
 elements.mobileDirectionToggle.addEventListener("click", () => {
   const deck = elements.mobileDirectionToggle.closest(".mobile-control-deck");
   const open = !deck.classList.contains("controls-open");
@@ -2071,34 +2404,45 @@ function returnVisibleHistoryToLive() {
 }
 
 function isInsideSessionScreen(target) {
-  return target instanceof Element && Boolean(target.closest(
+  const element = target instanceof Element ? target : target?.parentElement;
+  return Boolean(element?.closest(
     ".xterm-host, .xterm-history-layer, .terminal-history-status, .terminal-search, .terminal-copy, #openCopyText, #copyTextDialog",
   ));
 }
 
-// History is a temporary reading mode. Moving focus to any page control means
-// the user has left the session screen, so the visible terminal resumes live.
+function isOutsideSessionControl(target) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return !isInsideSessionScreen(element) && Boolean(element?.closest(
+    "button, input, textarea, select, a[href], [contenteditable='true'], [role='button'], #scrim",
+  ));
+}
+
+// Only explicit page controls exit history. Browser selection UI can move
+// focus/retarget events to body; that is not permission to destroy its Range.
 document.addEventListener("pointerdown", (event) => {
-  if (!isInsideSessionScreen(event.target)) returnVisibleHistoryToLive();
+  if (isOutsideSessionControl(event.target)) returnVisibleHistoryToLive();
 }, { capture: true });
 document.addEventListener("focusin", (event) => {
-  if (!isInsideSessionScreen(event.target)) returnVisibleHistoryToLive();
-  if (mobileSessionInputFocused()) syncComposerLayout({ fit: false });
+  if (isOutsideSessionControl(event.target)) returnVisibleHistoryToLive();
+  if (mobileSessionInputFocused()) {
+    syncComposerLayout({ fit: false });
+    followKeyboardViewport();
+  }
 });
 elements.terminalInput.addEventListener("focus", () => {
   returnVisibleHistoryToLive();
   syncVisualViewport();
-  if (navigator.maxTouchPoints > 0) followKeyboardViewport();
 });
 
 for (const name of ["pointerdown", "keydown", "touchstart"]) {
   window.addEventListener(name, markActivity, { passive: true });
 }
 document.addEventListener("visibilitychange", () => {
-  state.lastActivityAt = Date.now();
-  if (document.hidden) flushInputDraft();
-  heartbeat();
+  if (document.hidden) { flushInputDraft(); heartbeat(); }
+  else resumeForeground();
 });
+window.addEventListener("pageshow", resumeForeground);
+window.addEventListener("online", resumeForeground);
 // Browser chrome, app switching and tab visibility are not an explicit request
 // to leave history. Only page controls / the live button resume live output.
 window.addEventListener("resize", syncVisualViewport, { passive: true });
@@ -2114,6 +2458,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 setInterval(heartbeat, 3000);
+setInterval(checkStreamHealth, 1000);
 setInterval(() => { if (state.streamReady) streamSend({ type: "ping", clientAt: Date.now() }); }, 5000);
 setInterval(() => {
   for (const view of terminalViews.values()) if (view.visible) updateTerminalStatus(view);
@@ -2135,6 +2480,8 @@ setInterval(() => {
     if (!view.visible) continue;
     if (view.serverActive) streamSend({ type: "active", session: view.slug, active: false });
     view.serverActive = false;
+    view.lastSentCols = 0;
+    view.lastSentRows = 0;
     view.flowState = "闲置暂停 · 操作即恢复";
     updateTerminalStatus(view);
   }

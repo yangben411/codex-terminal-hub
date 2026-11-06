@@ -11,6 +11,7 @@ import { RenderFlow, TerminalBroker } from "./terminal-broker.mjs";
 import { historyCaptureRange } from "./history-range.mjs";
 import { directorySuggestions, resolveDirectoryInput } from "./directory-suggestions.mjs";
 import { createSessionNames } from "./session-name.mjs";
+import { TmuxWorkspace } from "./tmux-workspace.mjs";
 import { tmuxPath, tmuxArgs, codexPath, shellQuote, isExecutable } from "./runtime-paths.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -82,7 +83,7 @@ function boundedEnvNumber(name, fallback, minimum, maximum) {
 
 function log(message, details = "") {
   const suffix = details ? ` ${details}` : "";
-  process.stdout.write(`[terminal-hub] ${message}${suffix}\n`);
+  process.stdout.write(`[terminal-hub] ${new Date().toISOString()} ${message}${suffix}\n`);
 }
 
 function sessionToSlug(sessionName) {
@@ -202,6 +203,16 @@ async function runTmux(args, options = {}) {
 }
 
 async function captureSessionHistory(session, { before = 0 } = {}) {
+  const broker = terminalBrokers.get(session.name);
+  if (before === 0 && broker && !broker.closed && broker.lastResizeAt > 0) {
+    // agy (BubbleTea v2 InlineStrategy) debounces SIGWINCH by 150ms before
+    // emitting ClearScreen + FlushToScrollback. Avoid snapshotting mid-clear.
+    const sinceResizeMs = Date.now() - broker.lastResizeAt;
+    if (sinceResizeMs >= 0 && sinceResizeMs < 260) {
+      await new Promise((resolve) => setTimeout(resolve, 260 - sinceResizeMs));
+    }
+    await broker.waitUntilParsed();
+  }
   const target = `${exactTarget(session.name)}:`;
   const metadata = await runTmux([
     "display-message",
@@ -455,6 +466,7 @@ async function claimBrowserClient(payload = {}) {
   let result;
   const operation = clientClaimQueue.then(async () => {
     if (activeClientId && activeClientId !== clientId && !force) {
+      log("browser resume denied", `client=${clientId.slice(0, 8)} owner=${activeClientId.slice(0, 8)}`);
       result = {
         ...clientPresenceSnapshot(clientId),
         claimed: false,
@@ -478,6 +490,7 @@ async function claimBrowserClient(payload = {}) {
       }
       log("browser claimed", clientId.slice(0, 8));
     }
+    if (payload.reason === "foreground") log("browser resumed", `client=${clientId.slice(0, 8)} inherited=${!changed}`);
     result = {
       ...clientPresenceSnapshot(clientId),
       claimed: true,
@@ -490,14 +503,16 @@ async function claimBrowserClient(payload = {}) {
   return result;
 }
 
-async function ensureTerminalBroker(session, cols = 100, rows = 30) {
+async function ensureTerminalBroker(session, cols, rows) {
   const current = terminalBrokers.get(session.name);
   if (current && !current.closed) {
-    current.resize(cols, rows);
+    if (cols !== undefined || rows !== undefined) current.resize(cols, rows);
     return current;
   }
   if (current) terminalBrokers.delete(session.name);
 
+  const initialCols = Math.max(2, Math.min(500, Number(cols) || 100));
+  const initialRows = Math.max(2, Math.min(200, Number(rows) || 30));
   await runTmux(["has-session", "-t", exactTarget(session.name)]);
   await configureAdaptiveWindowSize(session);
   const broker = new TerminalBroker({
@@ -506,8 +521,8 @@ async function ensureTerminalBroker(session, cols = 100, rows = 30) {
     tmuxArgs,
     exactTarget,
     exclusive: exclusiveTerminal,
-    cols,
-    rows,
+    cols: initialCols,
+    rows: initialRows,
     scrollbackPages: historyCachePages,
     idleTimeoutMs: terminalBrokerIdleMs,
     captureHistory: () => refreshSessionHistoryCache(session),
@@ -760,6 +775,7 @@ async function sendTerminalSnapshot(record, subscription) {
     });
     subscription.flow.sent(snapshot.seq, Buffer.byteLength(snapshot.data, "utf8"));
   })().catch((error) => {
+    log("stream snapshot failed", `id=${record.id} session=${subscription.slug} error=${error.message}`);
     sendTerminalMessage(record.socket, {
       type: "error",
       session: subscription.slug,
@@ -821,8 +837,11 @@ async function reconcileTerminalSubscription(record, subscription) {
 }
 
 async function subscribeTerminal(record, message) {
+  const startedAt = Date.now();
   const slug = `${message.session || ""}`;
+  log("stream subscribe", `id=${record.id} session=${slug}`);
   const session = await resolveSession(slug);
+  if (record.socket.readyState !== WebSocket.OPEN) return;
   if (!session) throw new Error("tmux session no longer exists");
   const cols = Math.max(2, Math.min(500, Number(message.cols) || 100));
   const rows = Math.max(2, Math.min(200, Number(message.rows) || 30));
@@ -833,6 +852,7 @@ async function subscribeTerminal(record, message) {
   }
   if (!subscription) {
     const broker = await ensureTerminalBroker(session, cols, rows);
+    if (record.socket.readyState !== WebSocket.OPEN) return;
     subscription = {
       slug,
       broker,
@@ -861,6 +881,7 @@ async function subscribeTerminal(record, message) {
     subscription.broker.addListener(subscription.listener);
   }
   await sendTerminalSnapshot(record, subscription);
+  log("stream subscribe finished", `id=${record.id} session=${slug} elapsedMs=${Date.now() - startedAt} open=${record.socket.readyState === WebSocket.OPEN}`);
 }
 
 async function handleTerminalSocketMessage(record, raw) {
@@ -924,6 +945,7 @@ async function handleTerminalSocketMessage(record, raw) {
       if (mode === "copy-mode") await runTmux(["send-keys", "-t", paneId, "-X", "cancel"]);
       else if (mode) throw new Error("终端正在其他交互模式中，请退出后再发送");
     }
+    if (record.socket.readyState !== WebSocket.OPEN) return;
     subscription.broker.write(data);
     sendTerminalMessage(record.socket, {
       type: "input-ack",
@@ -954,6 +976,7 @@ async function handleApi(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/health") {
     sendJson(response, 200, {
       ok: true,
+      workspacePersistence: workspace?.status() || { enabled: false },
       host,
       port,
       defaultCwd,
@@ -1019,6 +1042,7 @@ async function handleApi(request, response, url) {
     requireActiveClientRequest(request);
     const payload = await readJson(request);
     const session = await createSession(payload);
+    await workspace?.save();
     sendJson(response, 201, { session });
     return true;
   }
@@ -1037,6 +1061,7 @@ async function handleApi(request, response, url) {
       broker.close();
     }
     await runTmux(["kill-session", "-t", exactTarget(session.name)]);
+    await workspace?.save();
     historySnapshots.delete(session.name);
     historyInterest.delete(session.name);
     historyFailures.delete(session.name);
@@ -1072,6 +1097,7 @@ async function handleApi(request, response, url) {
     } else {
       await runTmux(["set-option", "-u", "-t", `${exactTarget(session.name)}:`, "@codex_web_display_name"]);
     }
+    await workspace?.save();
     sendJson(response, 200, { session: { ...session, displayName } });
     return true;
   }
@@ -1110,6 +1136,7 @@ async function handleApi(request, response, url) {
 
   if (match[2] === "windows") {
     const window = await createWindow(session, payload);
+    await workspace?.save();
     sendJson(response, 201, { window });
     return true;
   }
@@ -1159,23 +1186,31 @@ terminalWebSocketServer.on("connection", (socket, request, context) => {
     }
   }
   const record = {
+    id: randomUUID().slice(0, 8),
+    startedAt: Date.now(),
     socket,
     clientId: context.clientId,
     subscriptions: new Map(),
     messageQueue: Promise.resolve(),
   };
   terminalSockets.add(record);
+  log("stream open", `id=${record.id} client=${record.clientId.slice(0, 8)}`);
   socket.on("message", (data) => {
     record.messageQueue = record.messageQueue
-      .then(() => handleTerminalSocketMessage(record, data))
+      .then(() => socket.readyState === WebSocket.OPEN && handleTerminalSocketMessage(record, data))
       .catch((error) => {
+        let session;
+        try { session = JSON.parse(data.toString("utf8")).session; } catch {}
+        log("stream message failed", `id=${record.id} error=${error.message}`);
         sendTerminalMessage(socket, {
           type: "error",
+          session,
           message: error.message || `${error}`,
         });
       });
   });
-  socket.on("close", () => {
+  socket.on("close", (code) => {
+    log("stream close", `id=${record.id} code=${code} elapsedMs=${Date.now() - record.startedAt}`);
     for (const subscription of record.subscriptions.values()) {
       forgetTerminalSubscription(record, subscription);
     }
@@ -1202,7 +1237,8 @@ server.on("upgrade", async (request, socket, head) => {
       return;
     }
     socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-  } catch {
+  } catch (error) {
+    log("stream upgrade rejected", error.message);
     socket.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
   }
 });
@@ -1210,6 +1246,9 @@ server.on("upgrade", async (request, socket, head) => {
 function shutdown(signal) {
   log("shutting down", signal);
   clearInterval(historyCacheTimer);
+  // Save periodically/after explicit changes, not during OS teardown where
+  // tmux may already have disappeared and look like an intentionally empty set.
+  workspace?.stop();
   for (const record of terminalSockets) record.socket.close(1001, "Server shutting down");
   for (const broker of terminalBrokers.values()) broker.close();
   server.close(() => process.exit(0));
@@ -1224,6 +1263,14 @@ const historyCacheTimer = setInterval(
   historyCacheRefreshMs,
 );
 historyCacheTimer.unref();
+
+const workspace = process.env.CODEX_TERMINAL_WORKSPACE_SAVE !== "0" ? new TmuxWorkspace({
+  tmuxPath, tmuxArgs, fallbackCwd: defaultCwd, log,
+  file: process.env.CODEX_TERMINAL_WORKSPACE_FILE || path.join(rootDir, ".local",
+    `tmux-workspace${process.env.CODEX_TERMINAL_TMUX_SOCKET ? `-${process.env.CODEX_TERMINAL_TMUX_SOCKET}` : ""}.json`),
+  intervalMs: boundedEnvNumber("CODEX_TERMINAL_WORKSPACE_SAVE_MS", 60000, 1000, 3600000),
+}) : null;
+await workspace?.start();
 
 server.listen(port, host, () => {
   log("ready", `http://${host}:${server.address().port}`);

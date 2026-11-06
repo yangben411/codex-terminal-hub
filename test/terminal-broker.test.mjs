@@ -69,6 +69,11 @@ test("TerminalBroker attaches tmux, serializes history, and leaves the session a
     assert.doesNotMatch(captured.stdout, /0;276;0c/);
     assert.ok(snapshot.seq > 0);
     assert.ok(broker.stats().terminalResponses > 0);
+    assert.equal(broker.lastResizeAt, 0);
+    broker.resize(90, 24);
+    assert.equal(broker.lastResizeAt, 0);
+    broker.resize(92, 24);
+    assert.ok(broker.lastResizeAt > 0);
     broker.close();
     await run(["has-session", "-t", `=${session}`]);
   } finally {

@@ -2,13 +2,14 @@
 
 浏览器的 xterm.js 通过一条 WebSocket 连接 Node HTTP 服务。Node 为每个已打开的 session 建立 node-pty，由 PTY 执行 `tmux attach-session`。Tailscale Serve 在前面提供 tailnet 内 HTTPS/WSS 入口；本应用不调用 Tailscale 管理 API。
 
-## 三种不同的数据
+## 不同的数据与生命周期
 
 | 数据 | 位置 | 生命周期 |
 | --- | --- | --- |
 | Shell/CLI 进程和 tmux 保留历史 | 服务用户的 tmux server | 网页/Hub 断开后仍在；session 被终止或主机重启则不保证保留 |
 | 实时画面、渲染重放和历史快照 | Node 内存和浏览器内存 | 重连可从 tmux / headless xterm 恢复当前画面；不是磁盘存档 |
 | 最近 3 条输入、未发送草稿 | 当前来源的浏览器 localStorage | 通常跨刷新保留；清除网站数据会删除，不跨域名或设备同步 |
+| 会话、窗口、分屏和目录 | `.local/tmux-workspace*.json` | 默认每 60 秒保存，启动时 tmux 为空则重建 Shell；不保存或重启旧程序 |
 
 显示标签写在 tmux session 的 `@codex_web_display_name` 选项中，因此各设备看到一致的标签，但不改变 session 实际名称。没有应用数据库，没有把整个 Codex 会话目录读入或上传的机制。
 
@@ -40,6 +41,8 @@
 ## 连接、布局与回收
 
 每个浏览器窗口有一个随机 client ID，它只用于单用户所有权协调，不是身份凭证。新窗口无强制 claim 时显示占用状态；用户点击 Reconnect 后 claim `force: true`，旧浏览器 WebSocket 关闭。
+
+client ID 保存在页面的 sessionStorage，兼容原有 window.name。切回前台、pageshow 或网络恢复时执行非强制 claim：当前所有者仍是该页面，或服务重启后尚无所有者时，自动恢复；如果已有不同页面接管，即使对方离线，也不会自动抢回。确认成功后解除闲置暂停，检查实时通道并恢复订阅。授权和心跳请求有超时，迟到的旧心跳不能撤销更新后的授权状态。清除网站数据或浏览器丢弃页面存储后无法保证身份延续；这不是跨设备登录凭证。
 
 应用内切换 session 时保留前端终端对象和后端 broker，停掉隐藏视图增量推送。后台继续解析输出，切回来快速用快照对齐；默认 15 分钟后回收闲置视图/PT​​Y。整个页面没有活动 15 分钟也暂停可见订阅。连接回收从不主动 kill-session。
 
