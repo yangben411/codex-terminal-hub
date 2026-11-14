@@ -8,6 +8,21 @@
 
 > **先看安全边界：本项目没有应用层账号和密码。能够访问服务的人，就能够以服务用户的权限操作终端。默认只监听 `127.0.0.1`，远程访问使用 Tailscale Serve，并通过 tailnet 访问策略限制到你自己的设备。不要使用 Funnel、不要直接开放公网端口。**
 
+## 界面预览
+
+以下截图使用真实网页界面与**完全虚构的演示数据**生成，不连接个人 tmux、Tailscale 或实际项目。会话名、路径、终端输出及延迟均为示例；展示的是 2026-11-14 本地开发界面，不代表已发布版本。界面目前为中文，英文使用说明见 [English README](README.en.md)。
+
+**桌面：会话总览与终端输入**
+
+![桌面会话总览，四个虚构项目](docs/screenshots/desktop-overview.png)
+![桌面终端，固定底部输入栏](docs/screenshots/desktop-terminal.png)
+
+**手机：方向与模式快捷键、独立历史缓存**
+
+<img src="docs/screenshots/mobile-controls.png" alt="手机终端及方向、Esc、Shift+Tab 模式按钮" width="320"> <img src="docs/screenshots/mobile-history.png" alt="手机历史缓存阅读界面" width="320">
+
+手机截图为浏览器移动尺寸模拟，不包含系统软键盘或 Safari 地址栏。截图的脱敏与重建方式见 [截图说明](docs/screenshots/README.md)。
+
 ## 能做什么
 
 | 场景 | 当前实现 |

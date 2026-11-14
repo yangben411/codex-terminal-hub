@@ -6,6 +6,21 @@ A private, mobile-friendly browser interface for your persistent tmux sessions. 
 
 **Single user, trusted devices only. There is no application login. Anyone who can reach this service can obtain a shell with the host user's permissions. Keep the listener on loopback and restrict access using your tailnet policy. Never expose it with Tailscale Funnel or a public port.**
 
+## Screenshots
+
+These captures use the real web UI with **entirely synthetic demo data**. They do not connect to personal tmux sessions, Tailscale, or real projects. Session names, paths, output, and latency are illustrative. They show the local development UI as of 2026-11-14, not necessarily a released version. The interface is currently Chinese; this README provides English usage instructions.
+
+**Desktop: session overview and terminal composer**
+
+![Desktop overview with four fictional projects](docs/screenshots/desktop-overview.png)
+![Desktop terminal with a bottom composer](docs/screenshots/desktop-terminal.png)
+
+**Mobile: direction and mode keys, independent history reader**
+
+<img src="docs/screenshots/mobile-controls.png" alt="Mobile terminal with direction, Esc and Shift+Tab mode controls" width="320"> <img src="docs/screenshots/mobile-history.png" alt="Mobile cached history reader" width="320">
+
+Mobile captures emulate a narrow browser viewport, without an OS keyboard or Safari chrome. See [capture and privacy notes](docs/screenshots/README.md) for reproduction details.
+
 ## Features
 
 - Session overview, search, single-session focus and up to four-session multi-view.
