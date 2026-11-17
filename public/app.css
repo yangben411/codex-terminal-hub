@@ -389,6 +389,19 @@ button:disabled {
     var(--bg);
 }
 
+.connection-progress {
+  position: absolute; z-index: 35; top: calc(64px + env(safe-area-inset-top));
+  left: 12px; right: 12px; padding: 12px; border-radius: 10px;
+  background: #14271f; color: #e5eee8; border: 1px solid #527563;
+  box-shadow: 0 4px 20px #0006; pointer-events: none;
+}
+.connection-progress[hidden] { display: none; }
+.connection-progress > span { float: right; font-size: 12px; }
+.connection-progress p { margin: 6px 0; font-size: 12px; }
+.connection-progress ol { display: flex; gap: 8px; list-style: none; padding: 0; margin: 0; font-size: 11px; }
+.connection-progress li { opacity: .4; }
+.connection-progress li[data-done="true"] { opacity: 1; color: #a8ecc4; }
+
 .topbar {
   flex: 0 0 auto;
   width: 100%;
@@ -981,6 +994,7 @@ p { margin-top: 0; }
 .composer-connection[data-state="offline"]::before { background: #ff7b86; }
 
 .mobile-dpad { display: none; }
+#languageSelect { max-width: 100px; min-width: 0; padding: 6px; font-size: 12px; }
 
 .composer-row {
   display: grid;
@@ -1405,6 +1419,8 @@ dialog select { min-height: 42px; padding: 0 11px; }
   .dpad-enter { grid-area: 2 / 2; }
   .dpad-right { grid-area: 2 / 3; }
   .dpad-down { grid-area: 3 / 2; }
+  .dpad-mode { grid-area: 3 / 3; }
+  .dpad-mode small { font-size: 10px; line-height: 13px; }
 
   .mobile-dpad .dpad-enter {
     border-color: #39634f;

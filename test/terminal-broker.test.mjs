@@ -59,6 +59,9 @@ test("TerminalBroker attaches tmux, serializes history, and leaves the session a
     broker.write(`for i in {1..40}; do printf '${cachePrefix}_%03d\\n' $i; done; printf '%s%s\\n' 'BROKER_' '${marker.slice(7)}'\r`);
     await received;
     const snapshot = await broker.snapshot();
+    const compact = await broker.snapshot({ viewportOnly: true });
+    assert.ok(Buffer.byteLength(compact.data) <= Buffer.byteLength(snapshot.data));
+    assert.match(compact.data, new RegExp(marker));
     assert.match(snapshot.data, new RegExp(marker));
     assert.match(snapshot.data, new RegExp(`${cachePrefix}_040`));
     const captured = await run([

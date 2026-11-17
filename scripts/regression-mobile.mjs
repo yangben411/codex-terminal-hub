@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
 // Hooks only exist in this in-memory test bundle, never in public/terminal.js.
 const compiled = await build({
-  stdin: { contents: source + "\nwindow.hubTest = { state, resumeForeground, heartbeat, getOrCreateClientId, checkStreamHealth, inputDelivery, terminalViews, openHistoryCache, returnToLive, loadEarlierHistory, fitTerminal };", resolveDir: `${root}/src`, loader: "js" },
+  stdin: { contents: source + "\nwindow.hubTest = { state, connectionProgress, resumeForeground, heartbeat, pingStream, sessionLatency, getOrCreateClientId, checkStreamHealth, inputDelivery, terminalViews, openHistoryCache, returnToLive, loadEarlierHistory, fitTerminal };", resolveDir: `${root}/src`, loader: "js" },
   bundle: true, format: "esm", platform: "browser", write: false, outfile: "terminal.js",
 });
 let earlierRequests = 0, historyRequests = 0;
@@ -24,11 +24,12 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname.includes("/history")) {
     historyRequests++;
     if (url.searchParams.has("before")) {
+      assert.equal(url.searchParams.get("snapshot"), "frozen-history-test", "pagination must retain the frozen snapshot identity");
       earlierRequests++;
       if (delayPage) await new Promise(resolve => setTimeout(resolve, 250));
     }
     return json({ content: Array.from({ length: 160 }, (_, i) => `\x1b[31m历史第\x1b[0m ${i} 行\r\n`).join(""),
-      lines: 160, capturedAt: historyRequests, nextBefore: historyRequests * 160, hasEarlier: true, pending: false });
+      snapshotId: "frozen-history-test", lines: 160, capturedAt: historyRequests, nextBefore: historyRequests * 160, hasEarlier: true, pending: false });
   }
   if (url.pathname === "/api/sessions") return json({ sessions: [session], defaultCwd: "/tmp" });
   if (url.pathname.startsWith("/api/")) return json({ active: true, occupied: true, phase: "live" });
@@ -40,7 +41,7 @@ const server = http.createServer(async (request, response) => {
   if (!/^[a-zA-Z0-9.-]+$/.test(name)) { response.writeHead(404); return response.end(); }
   try {
     const file = await readFile(`${root}/public/${name}`);
-    response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : name.endsWith(".html") ? "text/html" : "application/octet-stream");
+    response.setHeader("Content-Type", name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : name.endsWith(".html") ? "text/html" : "application/octet-stream");
     response.end(file);
   } catch { response.writeHead(404); response.end(); }
 });
@@ -52,6 +53,9 @@ try {
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.addInitScript(() => {
+    localStorage.setItem("terminal-hub-language", "zh");
+    window.__holdSessionReady = true;
+    Object.defineProperty(navigator, "standalone", { value: true });
     Object.defineProperty(navigator, "clipboard", { value: {
       async writeText(text) {
         if (window.__denyCopy) throw new Error("denied");
@@ -82,8 +86,13 @@ try {
         if (data.type === "resize") window.__hubResizeCount = (window.__hubResizeCount || 0) + 1;
         if (data.type === "input") (window.__hubInputs ||= []).push(data.data);
         if (data.type === "subscribe") setTimeout(() => this.message({ type: "snapshot", session: data.session, seq: 1, data: "LIVE\r\n" }), 0);
-        if (data.type === "ping") this.message({ type: "pong", clientAt: data.clientAt });
-        if (data.type === "session-ping") this.message({ type: "session-pong", session: data.session, clientAt: data.clientAt, connected: true });
+        if (data.type === "ping" && !this.dropPong) this.message({ type: "pong", clientAt: data.clientAt,
+          sessions: (data.sessions || []).map(session => ({ session, connected: true })) });
+        if (data.type === "session-ping") {
+          const reply = () => this.message({ type: "session-pong", session: data.session, clientAt: data.clientAt, connected: true });
+          if (window.__holdSessionReady) window.__releaseSessionReady = reply;
+          else reply();
+        }
         if (data.type === "input") {
           const ack = () => this.message({ type: "input-ack", inputId: data.inputId, session: data.session });
           if (window.__hubHoldAck) window.__hubReleaseAck = ack;
@@ -94,13 +103,84 @@ try {
     }
     window.WebSocket = Socket;
   });
-  await page.goto(`http://127.0.0.1:${server.address().port}/?session=${session.slug}`);
+  let releaseProgram;
+  let programContinued;
+  const programRouteDone = new Promise(resolve => { programContinued = resolve; });
+  await page.route("**/terminal.js?*", async route => {
+    await new Promise(resolve => { releaseProgram = resolve; });
+    await route.continue();
+    programContinued();
+  });
+  await page.goto(`http://127.0.0.1:${server.address().port}/?session=${session.slug}`, { waitUntil: "commit" });
+  await page.locator("#bootStatus").waitFor({ state: "visible" });
+  assert.match(await page.locator("#bootStatus").textContent(), /正在加载终端程序/);
+  assert.equal(await page.evaluate(() => Boolean(window.hubTest)), false, "loading UI appears before the terminal bundle executes");
+  await page.waitForFunction(() => document.getElementById("bootTime")?.textContent.includes("已等待"));
+  if (process.env.BOOT_SCREENSHOT) await page.screenshot({ path: process.env.BOOT_SCREENSHOT });
+  assert.ok(releaseProgram, "terminal resource was delayed for this test");
+  releaseProgram();
+  await programRouteDone;
+  await page.unroute("**/terminal.js?*");
+  await page.waitForFunction(() => [...window.hubTest?.terminalViews.values() || []].some(view => view.inputReady));
+  await page.waitForTimeout(1250);
+  assert.equal(historyRequests, 0, "first frame alone must not trigger history loading before session readiness");
+  await page.evaluate(() => { window.__holdSessionReady = false; window.__releaseSessionReady(); });
   await page.waitForFunction(() => [...window.hubTest?.terminalViews.values() || []].some(view => view.inputReady && view.historyReady));
+  assert.equal(await page.locator("#bootStatus").count(), 0, "main app removes the early loading UI");
   assert.equal(await page.locator("#composerStatus").getAttribute("data-state"), "ready", "input-ready only after terminal snapshot");
+  assert.equal(await page.locator("#connectionProgress li").count(), 5);
+  assert.match(await page.locator("#connectionProgressTitle").textContent(), /5\/5/);
+  if (process.env.CONNECTION_SCREENSHOT) {
+    await page.evaluate(() => hubTest.connectionProgress(2, "正在打开当前会话，只同步当前屏幕。"));
+    await page.screenshot({ path: process.env.CONNECTION_SCREENSHOT });
+    await page.evaluate(() => hubTest.connectionProgress(4, "当前会话已确认可操作。"));
+  }
+  let redundantCalls = 0;
+  await page.route("**/api/client/heartbeat", route => { redundantCalls++; return route.fulfill({ json: { active: true, occupied: true } }); });
+  await page.route("**/api/client/claim", route => { redundantCalls++; return route.fulfill({ json: { active: true, occupied: true } }); });
+  await page.evaluate(async () => { await hubTest.heartbeat(); await hubTest.resumeForeground(); });
+  assert.equal(redundantCalls, 0, "healthy owner needs neither HTTP polling nor repeated foreground claim");
+  await page.unroute("**/api/client/heartbeat");
+  await page.unroute("**/api/client/claim");
+  await page.evaluate(() => {
+    window.__beforeNetworkChange = hubTest.state.stream;
+    window.dispatchEvent(new Event("online"));
+    if (hubTest.state.stream !== window.__beforeNetworkChange) throw new Error("online must not discard a healthy transport");
+    window.__newNetworkStream = hubTest.state.stream;
+  });
+  await page.waitForFunction(() => [...hubTest.terminalViews.values()][0].inputReady);
+  assert.equal(await page.evaluate(() => hubTest.state.stream === window.__newNetworkStream), true,
+    "foreground verification must not cancel a newly connecting socket");
   assert.equal(await page.locator(".composer-session-name").isVisible(), false, "mobile status omits session name");
+  await page.evaluate(() => {
+    const {state, terminalViews, pingStream, sessionLatency, checkStreamHealth} = hubTest;
+    const view = [...terminalViews.values()][0];
+    const socket = state.stream;
+    const delayedProbe = Date.now() - 20000;
+    state.streamProbeAt = delayedProbe;
+    state.streamPongAt = delayedProbe;
+    view.sessionProbeAt = delayedProbe;
+    view.sessionPongAt = delayedProbe;
+    if (sessionLatency(view) !== '响应较慢') throw new Error('stale RTT must become slow, not a false numeric latency');
+    checkStreamHealth();
+    if (state.stream !== socket) throw new Error('20-second silence must retain socket');
+    pingStream();
+    if (state.streamProbeAt !== delayedProbe) throw new Error('do not supersede a delayed probe');
+    socket.message({type:'pong',clientAt:delayedProbe,sessions:[{session:view.slug,connected:true}]});
+    if (state.streamProbeAt !== 0 || !sessionLatency(view).endsWith(' ms')) throw new Error('late valid pong must recover without reconnecting');
+  });
   await page.locator("#mobileDirectionToggle").tap();
   await page.locator('#mobileDpad [data-key="escape"]').tap();
   assert.equal(await page.evaluate(() => window.__hubInputs.at(-1)), "\x1b", "Esc sends the escape byte to the session");
+  await page.waitForFunction(() => document.querySelector('#composerStatus').dataset.state === 'ready');
+  const modeInputsBefore = await page.evaluate(() => window.__hubInputs.length);
+  await page.locator('#mobileDpad [data-key="shift-tab"]').tap();
+  assert.equal(await page.evaluate(() => window.__hubInputs.length), modeInputsBefore + 1);
+  assert.equal(await page.evaluate(() => window.__hubInputs.at(-1)), "\x1b[Z", "mode key sends only Shift+Tab, without Enter");
+  await page.evaluate(() => { [...hubTest.terminalViews.values()][0].inputReady = false; });
+  await page.locator('#mobileDpad [data-key="shift-tab"]').tap();
+  assert.equal(await page.evaluate(() => window.__hubInputs.length), modeInputsBefore + 1, "unready mode switches are not sent or queued");
+  await page.evaluate(() => { [...hubTest.terminalViews.values()][0].inputReady = true; });
   await page.locator("#mobileDirectionToggle").tap();
   assert.equal(await page.locator("#windowStrip").isVisible(), false, "mobile omits tmux window strip");
   assert.equal(await page.locator("#newWindowButton").isVisible(), false, "mobile omits new window control");
@@ -248,6 +328,28 @@ try {
     }, footer), true, footer
       ? "parked top cursor must not crop agy's bottom input and model footer"
       : "sparse prompt must remain visible instead of an empty black tail");
+  }
+  // Clearing a tall agy screen must release the old keyboard lift even when
+  // output keeps arriving, and also when the clear is the final output chunk.
+  for (const streaming of [true, false]) {
+    const lift = await page.evaluate(async streaming => {
+      const view = [...hubTest.terminalViews.values()][0];
+      await new Promise(resolve => view.term.write(`\x1b[2J\x1b[${view.term.rows};1Hfooter`, resolve));
+      hubTest.fitTerminal(view);
+      const before = view.lastKeyboardLift;
+      view.lastOutputAt = Date.now();
+      await new Promise(resolve => view.term.write("\x1b[2J\x1b[Hvisible prompt\r\n> ", resolve));
+      hubTest.fitTerminal(view);
+      const interval = streaming ? setInterval(() => {
+        view.lastOutputAt = Date.now();
+        hubTest.fitTerminal(view);
+      }, 30) : null;
+      await new Promise(resolve => setTimeout(resolve, 450));
+      clearInterval(interval);
+      return { before, after: view.lastKeyboardLift };
+    }, streaming);
+    assert.ok(lift.before > 0, "fixture must start with a lifted terminal");
+    assert.equal(lift.after, 0, `old agy lift must expire without requiring silence or another output: ${streaming}`);
   }
   await page.locator("#terminalInput").fill("保留草稿");
   await page.locator("#dismissKeyboard").tap();
@@ -506,12 +608,12 @@ try {
       inputDelivery.flush(view.slug, true);
       if (failure === "handshake") {
         state.streamReady = false;
-        state.streamStartedAt = Date.now() - 13000;
+        state.streamStartedAt = Date.now() - 31000;
         state.stream.readyState = WebSocket.CONNECTING;
-      } else if (failure === "heartbeat") state.streamPongAt = Date.now() - 16000;
+      } else if (failure === "heartbeat") state.streamPongAt = Date.now() - 61000;
       else {
         view.inputReady = false;
-        view.subscriptionStartedAt = Date.now() - 16000;
+        view.subscriptionStartedAt = Date.now() - 61000;
       }
       checkStreamHealth();
       if (inputDelivery.job) throw new Error("uncertain input must be stopped");
@@ -525,6 +627,17 @@ try {
     });
     assert.notEqual(await page.evaluate(() => [...hubTest.terminalViews.values()][0].lastSeq), 999, "retired socket cannot overwrite current screen");
   }
+  await page.evaluate(async () => {
+    const oldSocket = hubTest.state.stream;
+    oldSocket.dropPong = true;
+    // A transport can remain OPEN after Safari resumes even though outbound
+    // messages no longer reach the server. Buffered old pongs prove nothing.
+    const recovery = hubTest.resumeForeground();
+    setTimeout(() => oldSocket.message({ type: "pong", clientAt: 1 }), 100);
+    await recovery;
+    if (hubTest.state.stream === oldSocket) throw new Error("foreground must replace a half-open socket despite stale pong");
+  });
+  await page.waitForFunction(() => [...hubTest.terminalViews.values()][0].inputReady);
   await page.evaluate(async () => {
     const { state, terminalViews, resumeForeground, getOrCreateClientId } = hubTest;
     const id = state.clientId;
@@ -542,20 +655,33 @@ try {
     await new Promise(resolve => { releaseHeartbeat = resolve; });
     await route.fulfill({ json: { active: false, occupied: true, phase: "live" } });
   });
-  await page.evaluate(() => { window.__pendingHeartbeat = hubTest.heartbeat(); });
+  await page.evaluate(() => { hubTest.state.streamReady = false; window.__pendingHeartbeat = hubTest.heartbeat(); });
   while (!releaseHeartbeat) await new Promise(resolve => setTimeout(resolve, 10));
-  await page.evaluate(() => hubTest.resumeForeground());
+  await page.evaluate(() => { hubTest.state.streamReady = true; return hubTest.resumeForeground(); });
   releaseHeartbeat();
   await page.evaluate(() => window.__pendingHeartbeat);
   assert.equal(await page.evaluate(() => hubTest.state.clientActive), true, "stale heartbeat cannot revoke recovered ownership");
   await page.unroute("**/api/client/heartbeat");
   await page.route("**/api/client/claim", route => route.fulfill({ json: { active: false, occupied: true, phase: "live" } }));
+  await page.evaluate(() => { hubTest.state.clientActive = false; });
   assert.equal(await page.evaluate(() => hubTest.resumeForeground()), false);
   assert.equal(await page.evaluate(() => hubTest.state.clientActive), false, "newer owner requires manual reconnect");
   assert.equal(await page.evaluate(() => hubTest.state.stream), null);
   await page.unroute("**/api/client/claim");
-  await page.evaluate(() => hubTest.resumeForeground());
+  await page.evaluate(() => { hubTest.state.idleSuspended = true; });
+  await page.locator("#reclaimClient").click();
   await page.waitForFunction(() => [...hubTest.terminalViews.values()][0].inputReady);
+  assert.equal(await page.evaluate(() => hubTest.state.idleSuspended), false, "manual reconnect also clears idle suspension");
+  const installedId = await page.evaluate(() => hubTest.state.clientId);
+  await page.evaluate(() => {
+    sessionStorage.clear();
+    window.name = "";
+    history.replaceState(null, "", "/");
+  });
+  await page.reload();
+  await page.waitForFunction(() => [...hubTest.terminalViews.values()].some(view => view.inputReady));
+  assert.equal(await page.evaluate(() => hubTest.state.clientId), installedId, "installed app survives page identity loss");
+  assert.equal(await page.evaluate(() => hubTest.state.activeSlug), session.slug, "root URL restores last terminal without another tap");
   assert.deepEqual(errors, []);
   console.log("Mobile regression passed: stable history prepend/reflow/background output, blur retention, gesture-only pagination, stale response discard, keyboard viewport containment, no overlap, input ACK, cancelled touch momentum, desktop layout.");
 } finally {

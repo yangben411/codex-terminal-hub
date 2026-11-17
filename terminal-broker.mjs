@@ -197,7 +197,7 @@ export class TerminalBroker {
     return new Promise((resolve) => this.parseWaiters.push({ seq, resolve }));
   }
 
-  async snapshot() {
+  async snapshot({ viewportOnly = false } = {}) {
     const seq = this.seq;
     await this.waitUntilParsed(seq);
     return {
@@ -205,7 +205,7 @@ export class TerminalBroker {
       cols: this.cols,
       rows: this.rows,
       data: this.serializer.serialize({
-        scrollback: Math.max(0, this.rows * (this.scrollbackPages - 1)),
+        scrollback: viewportOnly ? 0 : Math.max(0, this.rows * (this.scrollbackPages - 1)),
       }),
     };
   }

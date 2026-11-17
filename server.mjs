@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { createGzip } from "node:zlib";
+import { pipeline } from "node:stream";
+import { acceptsGzip, matchesEtag } from "./static-http.mjs";
 import { access, stat, mkdir } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -8,10 +11,12 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
 import { RenderFlow, TerminalBroker } from "./terminal-broker.mjs";
-import { historyCaptureRange } from "./history-range.mjs";
+import { HistorySnapshots } from "./history-snapshots.mjs";
 import { directorySuggestions, resolveDirectoryInput } from "./directory-suggestions.mjs";
 import { createSessionNames } from "./session-name.mjs";
 import { TmuxWorkspace } from "./tmux-workspace.mjs";
+import { StreamAttempts } from "./stream-attempts.mjs";
+import { submitComposer } from "./composer-submit.mjs";
 import { tmuxPath, tmuxArgs, codexPath, shellQuote, isExecutable } from "./runtime-paths.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -47,6 +52,7 @@ const fieldSeparator = `__hub_${randomUUID()}__`;
 const terminalBrokers = new Map();
 const terminalSockets = new Set();
 const historySnapshots = new Map();
+const historyPages = new HistorySnapshots();
 const historyRefreshes = new Map();
 const historyInterest = new Map();
 const historyFailures = new Map();
@@ -116,6 +122,20 @@ function validateClientId(value) {
 function normalizeClientPresence(payload = {}, now = Date.now()) {
   const reportedActivityAt = Number(payload.lastActivityAt);
   return {
+    connection: {
+      version: /^[a-zA-Z0-9-]{1,64}$/.test(payload.connection?.version || "") ? payload.connection.version : "unknown",
+      standalone: payload.connection?.standalone === true,
+      socketState: [-1, 0, 1, 2, 3].includes(payload.connection?.socketState) ? payload.connection.socketState : -1,
+      ready: payload.connection?.ready === true,
+      verifying: payload.connection?.verifying === true,
+      idle: payload.connection?.idle === true,
+      sessionSelected: payload.connection?.sessionSelected === true,
+      inputReady: payload.connection?.inputReady === true,
+      timings: Object.fromEntries(["appReadyMs", "scriptDownloadMs", "scriptBytes", "firstInteractiveMs"].map(key => {
+        const value = payload.connection?.timings?.[key];
+        return [key, Number.isFinite(value) && value >= 0 && value <= 86400000 ? Math.round(value) : null];
+      })),
+    },
     visible: payload.visible === true,
     focused: payload.focused === true,
     lastActivityAt: Number.isFinite(reportedActivityAt)
@@ -152,6 +172,7 @@ function clientPresenceSnapshot(requesterClientId = null, now = Date.now()) {
 
   return {
     active: requesterClientId === activeClientId,
+    connection: activeClientPresence.connection,
     occupied: true,
     phase,
     displayed,
@@ -184,7 +205,7 @@ async function runTmux(args, options = {}) {
   try {
     const execOptions = {
       encoding: "utf8",
-      maxBuffer: 4 * 1024 * 1024,
+      maxBuffer: options.maxBuffer || 4 * 1024 * 1024,
     };
     if (options.timeoutMs) {
       execOptions.timeout = options.timeoutMs;
@@ -202,9 +223,9 @@ async function runTmux(args, options = {}) {
   }
 }
 
-async function captureSessionHistory(session, { before = 0 } = {}) {
+async function captureSessionHistory(session) {
   const broker = terminalBrokers.get(session.name);
-  if (before === 0 && broker && !broker.closed && broker.lastResizeAt > 0) {
+  if (broker && !broker.closed && broker.lastResizeAt > 0) {
     // agy (BubbleTea v2 InlineStrategy) debounces SIGWINCH by 150ms before
     // emitting ClearScreen + FlushToScrollback. Avoid snapshotting mid-clear.
     const sinceResizeMs = Date.now() - broker.lastResizeAt;
@@ -226,18 +247,17 @@ async function captureSessionHistory(session, { before = 0 } = {}) {
   const paneHeight = Number(paneHeightValue) || 24;
   const pageLines = Math.max(paneHeight, Math.min(historyCacheLines, paneHeight * historyCachePages));
   const historySizeNumber = Number(historySize) || 0;
-  const range = historyCaptureRange({ historySize: historySizeNumber, paneHeight, pageLines, before });
-  const captureOptions = { timeoutMs: historyCacheCaptureTimeoutMs, preserveWhitespace: true };
+  const captureOptions = { timeoutMs: historyCacheCaptureTimeoutMs, preserveWhitespace: true, maxBuffer: 32 * 1024 * 1024 };
   let captured = { content: "", degraded: false };
 
-  if (range.lines > 0) {
+  {
     const captureArgs = [
       "capture-pane",
       "-p",
       "-S",
-      String(range.start),
+      "-",
       "-E",
-      String(range.end),
+      "-",
       "-t",
       target,
     ];
@@ -254,13 +274,7 @@ async function captureSessionHistory(session, { before = 0 } = {}) {
     );
   }
 
-  return {
-    content: captured.content,
-    lines: range.lines,
-    before: range.before,
-    nextBefore: range.nextBefore,
-    hasEarlier: range.nextBefore !== null,
-    totalLines: range.totalLines,
+  return historyPages.create(session.name, captured.content, {
     historySize: historySizeNumber,
     paneWidth,
     paneHeight,
@@ -269,7 +283,7 @@ async function captureSessionHistory(session, { before = 0 } = {}) {
     activityBytesAtCapture: historyOutputBytes.get(session.name) || 0,
     degraded: captured.degraded,
     capturedAt: Date.now(),
-  };
+  }, pageLines);
 }
 
 function refreshSessionHistoryCache(session) {
@@ -488,9 +502,11 @@ async function claimBrowserClient(payload = {}) {
           record.socket.close(4001, "Terminal opened in another browser");
         }
       }
-      log("browser claimed", clientId.slice(0, 8));
+      log("browser claimed", `${clientId.slice(0, 8)} force=${force} reason=${["open", "manual", "foreground"].includes(payload.reason) ? payload.reason : "unknown"}`);
     }
-    if (payload.reason === "foreground") log("browser resumed", `client=${clientId.slice(0, 8)} inherited=${!changed}`);
+    if (payload.reason === "foreground") log("browser resumed", `client=${clientId.slice(0, 8)} inherited=${!changed} state=${JSON.stringify(activeClientPresence.connection)}`);
+    if (force && !changed) log("browser manual reconnect", `client=${clientId.slice(0, 8)} state=${JSON.stringify(activeClientPresence.connection)}`);
+    if (payload.reason === "open") log("browser startup", `client=${clientId.slice(0, 8)} state=${JSON.stringify(activeClientPresence.connection)}`);
     result = {
       ...clientPresenceSnapshot(clientId),
       claimed: true,
@@ -525,7 +541,8 @@ async function ensureTerminalBroker(session, cols, rows) {
     rows: initialRows,
     scrollbackPages: historyCachePages,
     idleTimeoutMs: terminalBrokerIdleMs,
-    captureHistory: () => refreshSessionHistoryCache(session),
+    // History is fetched separately after the live viewport is rendered.
+    // Do not block PTY attachment on a multi-page history capture.
     onOutput: (item) => {
       historyOutputBytes.set(
         session.name,
@@ -711,11 +728,28 @@ async function serveStatic(request, response, pathname) {
     const metadata = await stat(filePath);
     if (!metadata.isFile()) throw new Error("Not a file");
     applySecurityHeaders(response);
-    response.writeHead(200, {
+    const gzip = /\.(?:html|js|css|json|webmanifest|svg)$/.test(filePath)
+      && acceptsGzip(request.headers["accept-encoding"]);
+    const etag = `W/"${metadata.size.toString(16)}-${metadata.mtimeMs.toString(16)}"`;
+    const headers = {
       "Content-Type": contentTypes[path.extname(filePath)] || "application/octet-stream",
       "Cache-Control": "no-cache",
+      "ETag": etag,
+      "Last-Modified": metadata.mtime.toUTCString(),
+      "Vary": "Accept-Encoding",
+      ...(gzip ? { "Content-Encoding": "gzip" } : {}),
+    };
+    if (matchesEtag(request.headers["if-none-match"], etag)) {
+      response.writeHead(304, headers);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { ...headers, ...(!gzip ? { "Content-Length": metadata.size } : {}) });
+    if (request.method === "HEAD") { response.end(); return; }
+    const streams = [createReadStream(filePath), ...(gzip ? [createGzip()] : []), response];
+    pipeline(...streams, error => {
+      if (error && error.code !== "ERR_STREAM_PREMATURE_CLOSE") log("static transfer failed", error.message);
     });
-    createReadStream(filePath).pipe(response);
   } catch {
     sendJson(response, 404, { error: "Not found" });
   }
@@ -763,7 +797,8 @@ function forgetTerminalSubscription(record, subscription) {
 async function sendTerminalSnapshot(record, subscription) {
   if (!subscription.active || subscription.snapshotPromise) return subscription.snapshotPromise;
   subscription.snapshotPromise = (async () => {
-    const snapshot = await subscription.broker.snapshot();
+    const snapshot = await subscription.broker.snapshot({ viewportOnly: true });
+    log("stream snapshot bytes", `id=${record.id} session=${subscription.slug} bytes=${Buffer.byteLength(snapshot.data, "utf8")}`);
     if (!subscription.active || record.socket.readyState !== WebSocket.OPEN) return;
     subscription.flow.reset(snapshot.seq);
     subscription.awaitingSnapshotSeq = snapshot.seq;
@@ -889,10 +924,19 @@ async function handleTerminalSocketMessage(record, raw) {
   const message = JSON.parse(raw.toString("utf8"));
   activeClientSeenAt = Date.now();
   if (message.type === "ping") {
+    if (message.presence) activeClientPresence = normalizeClientPresence(message.presence);
+    if (!record.interactiveTimingLogged && activeClientPresence.connection?.timings?.firstInteractiveMs != null) {
+      record.interactiveTimingLogged = true;
+      log("browser first interactive", `id=${record.id} timings=${JSON.stringify(activeClientPresence.connection.timings)}`);
+    }
     sendTerminalMessage(record.socket, {
       type: "pong",
       clientAt: Number(message.clientAt) || null,
       serverAt: Date.now(),
+      sessions: Array.isArray(message.sessions) ? message.sessions.slice(0, 4).map(slug => {
+        const current = record.subscriptions.get(`${slug}`);
+        return { session: `${slug}`, connected: Boolean(current?.active && current.broker.pty && !current.broker.closed) };
+      }) : [],
     });
     return;
   }
@@ -946,7 +990,8 @@ async function handleTerminalSocketMessage(record, raw) {
       else if (mode) throw new Error("终端正在其他交互模式中，请退出后再发送");
     }
     if (record.socket.readyState !== WebSocket.OPEN) return;
-    subscription.broker.write(data);
+    if (message.inputId) await submitComposer(value => subscription.broker.write(value), data);
+    else subscription.broker.write(data);
     sendTerminalMessage(record.socket, {
       type: "input-ack",
       session: subscription.slug,
@@ -959,7 +1004,10 @@ async function handleTerminalSocketMessage(record, raw) {
     const snapshotAcknowledged = subscription.awaitingSnapshotSeq !== null
       && seq >= subscription.awaitingSnapshotSeq;
     const resumed = subscription.flow.acknowledge(seq);
-    if (snapshotAcknowledged) subscription.awaitingSnapshotSeq = null;
+    if (snapshotAcknowledged) {
+      subscription.awaitingSnapshotSeq = null;
+      log("stream snapshot acknowledged", `id=${record.id} session=${subscription.slug} seq=${seq}`);
+    }
     if ((snapshotAcknowledged || resumed) && (subscription.pending || subscription.broker.seq > seq)) {
       await reconcileTerminalSubscription(record, subscription);
     }
@@ -1106,7 +1154,11 @@ async function handleApi(request, response, url) {
     if (url.searchParams.has("before") && url.searchParams.get("before") !== "0") {
       const before = Math.max(0, Math.floor(Number(url.searchParams.get("before")) || 0));
       markHistoryInterest(session);
-      const page = await captureSessionHistory(session, { before });
+      const page = historyPages.page(session.name, url.searchParams.get("snapshot"), before);
+      if (!page) {
+        sendJson(response, 410, { error: "History snapshot expired. Return to live and reopen history." });
+        return true;
+      }
       sendJson(response, 200, {
         ...page,
         source: "cache-page",
@@ -1226,11 +1278,18 @@ terminalWebSocketServer.on("connection", (socket, request, context) => {
   });
 });
 
+const streamAttempts = new StreamAttempts();
 server.on("upgrade", async (request, socket, head) => {
   try {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     if (url.pathname === "/api/terminal-stream") {
       const clientId = assertActiveClient(url.searchParams.get("clientId"));
+      const attempt = Number(url.searchParams.get("attempt") || 0);
+      if (!streamAttempts.accept(clientId, attempt)) {
+        log("stream stale upgrade rejected", `client=${clientId.slice(0, 8)} attempt=${attempt}`);
+        socket.end("HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n");
+        return;
+      }
       terminalWebSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
         terminalWebSocketServer.emit("connection", webSocket, request, { clientId });
       });

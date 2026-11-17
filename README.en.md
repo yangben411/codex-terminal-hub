@@ -8,7 +8,7 @@ A private, mobile-friendly browser interface for your persistent tmux sessions. 
 
 ## Screenshots
 
-These captures use the real web UI with **entirely synthetic demo data**. They do not connect to personal tmux sessions, Tailscale, or real projects. Session names, paths, output, and latency are illustrative. They show the local development UI as of 2026-11-14, not necessarily a released version. The interface is currently Chinese; this README provides English usage instructions.
+These captures use the real web UI with **entirely synthetic demo data**. They do not connect to personal tmux sessions, Tailscale, or real projects. Session names, paths, output, and latency are illustrative. They show the Chinese version of the local development UI as of 2026-11-14, not necessarily a released version.
 
 **Desktop: session overview and terminal composer**
 
@@ -33,7 +33,7 @@ Mobile captures emulate a narrow browser viewport, without an OS keyboard or Saf
 - One multiplexed WebSocket, render acknowledgements, backpressure and snapshots. Per-session channel RTT is shown only for a confirmed usable terminal connection; disconnected or expired measurements are not displayed.
 - Explicit Reconnect takeover between browsers; session-view retention and idle cleanup without killing tmux.
 
-The interface is currently Chinese. Codex is optional: Shell mode and other terminal programs work too. This is an independent project, not an official OpenAI, Tailscale or tmux product.
+The interface defaults to English. Select **English / 中文** at the bottom of the sidebar (open the menu first on mobile). Your choice is stored in this browser. Switching saves your draft and reloads the page without stopping tmux tasks. Terminal output and custom session names are never translated. Codex is optional: Shell mode and other terminal programs work too. This is an independent project, not an official OpenAI, Tailscale or tmux product.
 
 ## Quick start
 

@@ -1,11 +1,12 @@
 // Synthetic-data documentation captures. Never connects to the real Hub/tmux.
 // Run after npm run build; set PLAYWRIGHT_MODULE / CHROMIUM_EXECUTABLE_PATH if needed.
 import http from "node:http";
+import assert from "node:assert/strict";
 import { readFile, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const root = fileURLToPath(new URL("../", import.meta.url));
-const output = `${root}/docs/screenshots`;
+const output = process.env.SCREENSHOT_OUTPUT || `${root}/docs/screenshots`;
 await mkdir(output, { recursive: true });
 const sessions = [
   ["web-demo", "示例网站", "node"], ["api-demo", "API 开发", "node"],
@@ -61,6 +62,9 @@ try {
   await page.setViewportSize({ width: 1440, height: 960 });
   await page.goto(origin);
   await page.locator(".session-card").first().waitFor();
+  assert.equal(await page.locator('html').getAttribute('lang'), 'en');
+  assert.equal(await page.locator('#overviewButton').textContent(), 'Overview');
+  assert.equal(await page.locator('.session-card h3').first().textContent(), '示例网站', 'user labels must not be translated');
   await page.locator(`[data-open-session="${sessions[0].slug}"]`).first().click();
   await page.waitForFunction(() => document.querySelector('#composerStatus').dataset.state === 'ready');
   await page.waitForTimeout(1800);
@@ -79,6 +83,22 @@ try {
   await page.waitForSelector('.xterm-history-layer:not([hidden])');
   await page.waitForTimeout(500);
   await page.screenshot({ path: `${output}/mobile-history.png` });
+  // Switch via the same control a mobile user sees; retain draft and session.
+  const draft = '未发送 draft /workspace/中文';
+  await page.locator('#terminalInput').fill(draft);
+  await page.locator('#openSidebar').click();
+  await page.locator('#languageSelect').selectOption('zh');
+  await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');
+  await page.waitForFunction(() => document.querySelector('#composerStatus').dataset.state === 'ready');
+  assert.equal(await page.locator('#overviewButton').textContent(), '总览');
+  assert.equal(await page.locator('#terminalInput').inputValue(), draft);
+  await page.reload();
+  await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');
+  assert.equal(await page.locator('#languageSelect').inputValue(), 'zh');
+  await page.locator('#openSidebar').click();
+  await page.locator('#languageSelect').selectOption('en');
+  await page.waitForFunction(() => document.documentElement.lang === 'en' && window.__hubAppReady);
+  assert.equal(await page.locator('#overviewButton').textContent(), 'Overview');
   if (errors.length) throw new Error(errors.join("\n"));
   console.log(`Saved four synthetic-data screenshots to ${output}`);
 } finally {
