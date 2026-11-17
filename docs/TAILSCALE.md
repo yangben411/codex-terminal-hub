@@ -52,7 +52,7 @@ ts serve status
 
 1. Tailscale 客户端随登录启动、账号连接正常。
 2. Hub 按 README 安装用户 LaunchAgent（`npm run service:install`）；用户服务依赖登录环境，不能保证 FileVault 解锁前可用。
-3. 重启后运行 `curl -I http://127.0.0.1:7681/` 和 `ts serve status`。macOS 重启会终止原 tmux 会话；不要把“网页服务恢复”理解为“原 CLI 进程恢复”。
+3. 重启后运行 `curl -I http://127.0.0.1:7681/` 和 `ts serve status`。Hub 默认从周期存档在空 tmux server 中重建窗口与目录；各窗口进入 Shell，原 CLI 对话由用户手动恢复。`/api/health` 的 `workspacePersistence` 可检查保存与恢复状态。
 
 Mac 睡眠、网络切换、设备密钥过期也会影响可访问性。按实际需求配置电源和登录策略，不要通过禁用全部安全措施来追求常在线。
 

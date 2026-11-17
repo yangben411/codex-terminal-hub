@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, realpath, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { WebSocket } from "ws";
+import http from "node:http";
+import { gunzipSync } from "node:zlib";
 import { tmuxPath } from "../runtime-paths.mjs";
 
 // Never connect to a running hub or the user's default tmux server.
@@ -24,6 +26,7 @@ try {
     cwd: root,
     env: { ...process.env, CODEX_TERMINAL_HOST: "127.0.0.1", CODEX_TERMINAL_PORT: "0",
       CODEX_TERMINAL_DEFAULT_CWD: directory, CODEX_TERMINAL_TMUX_SOCKET: socketName,
+      CODEX_TERMINAL_WORKSPACE_SAVE: "1", CODEX_TERMINAL_WORKSPACE_FILE: path.join(directory, "workspace.json"),
       CODEX_PATH: path.join(directory, "not-installed"), TMUX_PATH: tmuxPath },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -50,11 +53,44 @@ try {
   assert.equal((await fetch(`${base}/api/directories`)).status, 400);
   const claim = await request("/api/client/claim", { clientId, visible: true, focused: true });
   assert.equal(claim.active, true);
+  assert.equal((await request("/api/client/claim", { clientId, reason: "foreground" })).active, true,
+    "same page inherits ownership without force");
+  const otherClient = `${clientId}_other`;
+  assert.equal((await request("/api/client/claim", { clientId: otherClient })).active, false,
+    "new page cannot automatically steal control");
+  assert.equal((await request("/api/client/claim", { clientId: otherClient, force: true })).active, true);
+  assert.equal((await request("/api/client/claim", { clientId, reason: "foreground" })).active, false,
+    "old page cannot reclaim after a newer explicit takeover");
+  assert.equal((await request("/api/client/claim", { clientId, force: true })).active, true);
   assert.deepEqual((await request("/api/sessions")).sessions, [], "first run works without any tmux server");
   await runTmux("new-session", "-d", "-s", "fixture", "/bin/bash --noprofile --norc");
   await runTmux("set-option", "-g", "default-shell", "/bin/bash");
   const html = await (await fetch(base)).text();
   assert.match(html, /terminal\.js/);
+  assert.match(html, /id="bootStatus"/);
+  const compressed = await new Promise((resolve, reject) => {
+    http.get(`${base}/terminal.js`, { headers: { "Accept-Encoding": "gzip" } }, response => {
+      const chunks = [];
+      response.on("data", chunk => chunks.push(chunk));
+      response.on("error", reject);
+      response.on("end", () => resolve({ headers: response.headers, body: Buffer.concat(chunks) }));
+    }).on("error", reject);
+  });
+  const original = await readFile(path.join(root, "public", "terminal.js"));
+  assert.equal(compressed.headers["content-encoding"], "gzip");
+  assert.deepEqual(gunzipSync(compressed.body), original);
+  assert.ok(compressed.body.length < original.length * 0.5, "bundle should transfer less than half its original bytes");
+  const unchanged = await fetch(`${base}/terminal.js`, { headers: { "If-None-Match": compressed.headers.etag } });
+  assert.equal(unchanged.status, 304);
+  assert.equal((await unchanged.arrayBuffer()).byteLength, 0);
+  const changed = await fetch(`${base}/terminal.js`, { headers: { "If-None-Match": 'W/"obsolete"', "Accept-Encoding": "gzip;q=0" } });
+  assert.equal(changed.status, 200);
+  assert.equal(changed.headers.get("content-encoding"), null);
+  await changed.arrayBuffer();
+  const head = await fetch(`${base}/terminal.js`, { method: "HEAD", headers: { "Accept-Encoding": "identity" } });
+  assert.equal(Number(head.headers.get("content-length")), original.length);
+  assert.equal((await head.arrayBuffer()).byteLength, 0);
+  console.log(`Static transfer verified: ${original.length} -> ${compressed.body.length} bytes; unchanged request returns 304.`);
   for (const route of ["/api/output-buffer", "/terminal/old", "/app.js", "/app-v2.js"]) {
     assert.equal((await fetch(`${base}${route}`)).status, 404, `removed endpoint: ${route}`);
   }
@@ -97,9 +133,13 @@ try {
       if (message.type === "ready") {
         send({ type: "session-ping", session: session.slug, clientAt: Date.now() });
         send({ type: "subscribe", session: session.slug, cols: 90, rows: 24 });
-        send({ type: "ping", clientAt: Date.now() });
+        send({ type: "ping", clientAt: Date.now(), sessions: [session.slug], presence: { visible: true, focused: true } });
       }
-      if (message.type === "pong") pong = true;
+      if (message.type === "pong") {
+        assert.equal(message.sessions?.[0]?.session, session.slug);
+        assert.equal(message.sessions?.[0]?.connected, true);
+        pong = true;
+      }
       if (message.type === "session-pong" && message.session === session.slug) {
         if (message.connected === true) sessionPong = true;
         if (message.connected === false) disconnectedPong = true;
@@ -122,15 +162,51 @@ try {
   const history = await request(`/api/sessions/${session.slug}/history?refresh=1`);
   assert.equal(history.pending, false);
   assert.ok(history.content.includes(marker));
+  assert.ok(history.snapshotId);
+  // Deliberately mutate only the isolated smoke pane between page requests.
+  await runTmux("send-keys", "-t", `=${session.name}:`, "printf 'NEW_HISTORY_ROW\\n'", "Enter");
+  await request(`/api/sessions/${session.slug}/history?refresh=1`);
+  const frozenTail = await request(`/api/sessions/${session.slug}/history?before=1&snapshot=${history.snapshotId}`);
+  assert.equal(frozenTail.snapshotId, history.snapshotId);
+  const oldRows = history.content.split("\n").slice(0, -1);
+  assert.equal(frozenTail.content, oldRows.slice(0, -1).join("\n") + "\n",
+    "later output and fresh captures cannot change a frozen page");
+  const expired = await fetch(`${base}/api/sessions/${session.slug}/history?before=1&snapshot=missing`, { headers });
+  assert.equal(expired.status, 410, "unknown versions cannot silently page through live history");
   await request(`/api/sessions/${session.slug}/windows`, { name: "second", cwd: directory, startup: "shell" });
   const listed = await request("/api/sessions");
   assert.equal(listed.sessions.find(item => item.slug === session.slug).windows, 2);
   assert.ok(!listed.sessions.some(item => item.name === "missing_cli"));
   const health = await request("/api/health");
+  assert.equal(health.workspacePersistence.ready, true);
+  const savedWorkspace = JSON.parse(await readFile(path.join(directory, "workspace.json"), "utf8"));
+  assert.equal(savedWorkspace.sessions.find(item => item.name === session.name).windows.length, 2);
+  assert.equal(savedWorkspace.sessions.find(item => item.name === session.name).displayName, "工作终端");
   assert.ok(health.terminalBrokers.some(item => item.session === session.name));
   assert.ok(!("ttyd" in health));
   socket.close();
+  socket = new WebSocket(`${base.replace("http:", "ws:")}/api/terminal-stream?clientId=${clientId}&attempt=200`);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("ordered stream open timeout")), 5000);
+    socket.once("open", () => { clearTimeout(timer); resolve(); });
+    socket.once("error", error => { clearTimeout(timer); reject(error); });
+  });
+  const staleStatus = await new Promise((resolve, reject) => {
+    const stale = new WebSocket(`${base.replace("http:", "ws:")}/api/terminal-stream?clientId=${clientId}&attempt=199`);
+    const timer = setTimeout(() => { stale.terminate(); reject(new Error("stale upgrade timeout")); }, 5000);
+    stale.on("error", () => {});
+    stale.once("unexpected-response", (_, response) => {
+      clearTimeout(timer); response.resume(); stale.terminate(); resolve(response.statusCode);
+    });
+    stale.once("open", () => { clearTimeout(timer); stale.close(); reject(new Error("stale upgrade accepted")); });
+  });
+  assert.equal(staleStatus, 409);
+  assert.equal(socket.readyState, WebSocket.OPEN, "stale handshake must not replace the newer live socket");
+  socket.close();
   for (const item of [session, duplicate.session]) await request(`/api/sessions/${item.slug}`, null, "DELETE");
+  const afterDelete = JSON.parse(await readFile(path.join(directory, "workspace.json"), "utf8"));
+  assert.ok(!afterDelete.sessions.some(item => [session.name, duplicate.session.name].includes(item.name)),
+    "explicit session deletion must immediately update the persisted workspace");
   console.log("Smoke passed: isolated server, directory completion, Chinese names, labels, windows, WebSocket input/render ACK, RTT, history and deletion.");
 } finally {
   socket?.terminate();

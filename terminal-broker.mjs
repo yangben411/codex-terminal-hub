@@ -66,6 +66,7 @@ export class TerminalBroker {
     this.idleTimer = null;
     this.startedAt = 0;
     this.lastOutputAt = 0;
+    this.lastResizeAt = 0;
     this.terminalResponses = 0;
     this.closed = false;
     this.startPromise = null;
@@ -196,7 +197,7 @@ export class TerminalBroker {
     return new Promise((resolve) => this.parseWaiters.push({ seq, resolve }));
   }
 
-  async snapshot() {
+  async snapshot({ viewportOnly = false } = {}) {
     const seq = this.seq;
     await this.waitUntilParsed(seq);
     return {
@@ -204,7 +205,7 @@ export class TerminalBroker {
       cols: this.cols,
       rows: this.rows,
       data: this.serializer.serialize({
-        scrollback: Math.max(0, this.rows * (this.scrollbackPages - 1)),
+        scrollback: viewportOnly ? 0 : Math.max(0, this.rows * (this.scrollbackPages - 1)),
       }),
     };
   }
@@ -226,6 +227,7 @@ export class TerminalBroker {
     if (nextCols === this.cols && nextRows === this.rows) return;
     this.cols = nextCols;
     this.rows = nextRows;
+    this.lastResizeAt = Date.now();
     this.terminal.options.scrollback = Math.max(500, nextRows * this.scrollbackPages);
     this.terminal.resize(nextCols, nextRows);
     if (this.pty && !this.closed) this.pty.resize(nextCols, nextRows);

@@ -59,6 +59,9 @@ test("TerminalBroker attaches tmux, serializes history, and leaves the session a
     broker.write(`for i in {1..40}; do printf '${cachePrefix}_%03d\\n' $i; done; printf '%s%s\\n' 'BROKER_' '${marker.slice(7)}'\r`);
     await received;
     const snapshot = await broker.snapshot();
+    const compact = await broker.snapshot({ viewportOnly: true });
+    assert.ok(Buffer.byteLength(compact.data) <= Buffer.byteLength(snapshot.data));
+    assert.match(compact.data, new RegExp(marker));
     assert.match(snapshot.data, new RegExp(marker));
     assert.match(snapshot.data, new RegExp(`${cachePrefix}_040`));
     const captured = await run([
@@ -69,6 +72,11 @@ test("TerminalBroker attaches tmux, serializes history, and leaves the session a
     assert.doesNotMatch(captured.stdout, /0;276;0c/);
     assert.ok(snapshot.seq > 0);
     assert.ok(broker.stats().terminalResponses > 0);
+    assert.equal(broker.lastResizeAt, 0);
+    broker.resize(90, 24);
+    assert.equal(broker.lastResizeAt, 0);
+    broker.resize(92, 24);
+    assert.ok(broker.lastResizeAt > 0);
     broker.close();
     await run(["has-session", "-t", `=${session}`]);
   } finally {

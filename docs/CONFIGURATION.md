@@ -2,6 +2,16 @@
 
 复制 `.env.example` 为 `.env` 后编辑。`npm start`、`npm run doctor` 和生成的 LaunchAgent 会读取该文件；系统已有的环境变量优先于 `.env`。改动后重启 Hub 服务。不要提交 `.env`。
 
+## 会话结构存档
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `CODEX_TERMINAL_WORKSPACE_SAVE` | `1` | 周期保存并在空 tmux server 上恢复；`0` 禁用 |
+| `CODEX_TERMINAL_WORKSPACE_SAVE_MS` | `60000` | 保存周期，1000–3600000 毫秒 |
+| `CODEX_TERMINAL_WORKSPACE_FILE` | `.local/tmux-workspace.json` | 服务目录下的私有 JSON；独立 socket 默认附加 socket 名后缀 |
+
+只恢复名称、目录、窗口和分屏，不自动执行旧程序。已有运行中会话时跳过恢复。详见 README 的“周期保存与重启恢复”。
+
 ## 运行路径
 
 | 环境变量 | 默认 | 含义 |

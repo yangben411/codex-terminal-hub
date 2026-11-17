@@ -4,9 +4,27 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { isBareTerminalProtocolArtifact, isTerminalProtocolReply } from "./terminal-protocol.js";
 import { terminalPlainText } from "./terminal-text.js";
+import { renderStyledTerminal } from "./terminal-styled-text.js";
+import { HistorySelectionGuard, initialTextSelection } from "./history-selection-guard.js";
 import { GestureClipboard } from "./gesture-clipboard.js";
 import { InputDelivery } from "./input-delivery.js";
+import { connectionFailure, connectionTimeouts } from "./connection-health.js";
+import { pageIdentity } from "./page-identity.js";
 import "@xterm/xterm/css/xterm.css";
+
+const { t, errorText } = window.hubI18n;
+const languageSelect = document.getElementById("languageSelect");
+languageSelect.value = window.hubI18n.language;
+languageSelect.addEventListener("change", () => {
+  flushInputDraft();
+  try { localStorage.setItem(window.hubI18n.key, languageSelect.value); }
+  catch { showToast(t("无法保存语言设置，请允许浏览器本地存储"), "error"); return; }
+  // A reload keeps internal status values in one language and restores the
+  // existing page identity / selected session. tmux processes are unaffected.
+  location.reload();
+});
+
+const bootTimings = { appReadyMs: null, scriptDownloadMs: null, scriptBytes: null, firstInteractiveMs: null };
 
 const state = {
   sessions: [],
@@ -34,6 +52,7 @@ const state = {
   inputDraftTimer: null,
   viewportWidth: null,
   viewportHeight: null,
+  keyboardBaseHeight: null,
   keyboardOpen: false,
   inputComposing: false,
   inputCompositionEndedAt: -Infinity,
@@ -61,7 +80,7 @@ const elements = Object.fromEntries([
   "openTerminalTab", "overviewView", "terminalView", "emptyView", "sessionCount",
   "sessionGrid", "openSelectedMulti", "multiSelectionHint", "windowStrip", "terminalGrid",
   "composer", "composerToggle", "composerClose", "quickKeys", "mobileDpad", "composerStatus",
-  "terminalInput", "sendInputButton", "mobileDirectionToggle", "newSessionDialog", "newSessionForm", "createSessionSubmit",
+  "terminalInput", "sendInputButton", "dismissKeyboard", "mobileDirectionToggle", "newSessionDialog", "newSessionForm", "createSessionSubmit",
   "newWindowDialog", "newWindowForm", "newWindowContext", "createWindowSubmit", "clientTakeover",
   "clientTakeoverEyebrow", "clientTakeoverTitle", "clientTakeoverMessage", "clientPresenceDot",
   "clientPresenceLabel", "reclaimClient", "toast",
@@ -76,15 +95,15 @@ const inputDelivery = new InputDelivery({
     elements.terminalInput.readOnly = Boolean(job);
     elements.terminalInput.setAttribute("aria-busy", String(Boolean(job)));
     elements.sendInputButton.disabled = Boolean(job);
-    elements.sendInputButton.textContent = !job ? "发送 ↵" : job.phase === "queued" ? "等待连接…" : "等待确认…";
+    elements.sendInputButton.textContent = !job ? t("发送 ↵") : job.phase === "queued" ? t("等待连接…") : t("等待确认…");
     updateComposerConnection();
   },
   onSuccess: completeComposerInput,
   onFailure(job) {
     inputFailures.set(job.sessionSlug, true);
     showToast(job.phase === "sent"
-      ? "发送确认超时，已停止等待，不会自动重发；内容可能已送达，请先检查终端"
-      : "连接超时，本次发送已取消，不会在重连后补发；输入已保留", "error");
+      ? t("发送确认超时，已停止等待，不会自动重发；内容可能已送达，请先检查终端")
+      : t("连接超时，本次发送已取消，不会在重连后补发；输入已保留"), "error");
     updateComposerConnection();
   },
 });
@@ -133,7 +152,7 @@ function escapeHtml(value) {
 }
 
 function sessionLabel(session) {
-  return session?.displayName || session?.name || "当前终端";
+  return session?.displayName || session?.name || t("当前终端");
 }
 
 function compactPath(value) {
@@ -141,12 +160,12 @@ function compactPath(value) {
 }
 
 function relativeTime(timestamp) {
-  if (!timestamp) return "暂无活动";
+  if (!timestamp) return t("暂无活动");
   const seconds = Math.max(0, Math.floor(Date.now() / 1000 - timestamp));
-  if (seconds < 60) return "刚刚活跃";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
-  return `${Math.floor(seconds / 86400)} 天前`;
+  if (seconds < 60) return t("刚刚活跃");
+  if (seconds < 3600) return t`${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return t`${Math.floor(seconds / 3600)} 小时前`;
+  return t`${Math.floor(seconds / 86400)} 天前`;
 }
 
 function compactBytes(bytes) {
@@ -261,15 +280,15 @@ function updateComposerConnection() {
   const label = sessionLabel(getSession(slug));
   const job = inputDelivery.job;
   let status;
-  if (!state.clientActive) status = ["offline", "连接未就绪 · 点击重新连接后才能发送"];
-  else if (inputFailures.has(slug)) status = ["error", "发送已停止 · 输入已保留，请先检查终端"];
-  else if (job?.phase === "queued") status = ["waiting", "等待连接 · 输入栏已锁定，超时后取消"];
-  else if (job) status = ["sending", "等待终端确认 · 输入栏已锁定，请勿重复发送"];
-  else if (view?.sessionConnected === false) status = ["offline", "session 已断开 · 等待恢复连接"];
-  else if (sessionLatency(view) === "连接无响应") status = ["offline", "连接无响应 · 等待重新确认"];
-  else if (sessionLatency(view).endsWith(" ms")) status = ["ready", "已连接 · 可以输入并发送"];
-  else if (state.streamTimer || [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.stream?.readyState)) status = ["connecting", "正在连接终端 · 发送内容会暂存"];
-  else status = ["offline", "终端未连接 · 输入会暂存，连接后发送"];
+  if (!state.clientActive) status = ["offline", t("连接未就绪 · 点击重新连接后才能发送")];
+  else if (inputFailures.has(slug)) status = ["error", t("发送已停止 · 输入已保留，请先检查终端")];
+  else if (job?.phase === "queued") status = ["waiting", t("等待连接 · 输入栏已锁定，超时后取消")];
+  else if (job) status = ["sending", t("等待终端确认 · 输入栏已锁定，请勿重复发送")];
+  else if (view?.sessionConnected === false) status = ["offline", t("session 已断开 · 等待恢复连接")];
+  else if (sessionLatency(view) === t("响应较慢")) status = ["waiting", t("响应较慢 · 保留连接，等待恢复")];
+  else if (sessionLatency(view).endsWith(" ms")) status = ["ready", t("已连接 · 可以输入并发送")];
+  else if (state.streamTimer || [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.stream?.readyState)) status = ["connecting", t("正在连接终端 · 发送内容会暂存")];
+  else status = ["offline", t("终端未连接 · 输入会暂存，连接后发送")];
   elements.composerStatus.dataset.state = status[0];
   elements.composerStatus.querySelector(".composer-session-name").textContent = label ? `${label} · ` : "";
   elements.composerStatus.querySelector(".composer-state-label").textContent = status[1];
@@ -282,10 +301,10 @@ function activeWindow(session) {
 function sessionStatus(session) {
   const command = activeWindow(session)?.command;
   if (command && !["zsh", "bash", "fish"].includes(command)) {
-    return { label: `${command} 运行中`, className: "live" };
+    return { label: t`${command} 运行中`, className: "live" };
   }
-  if (session.attached > 0) return { label: "网页已连接", className: "live" };
-  return { label: "后台待命", className: "idle" };
+  if (session.attached > 0) return { label: t("网页已连接"), className: "live" };
+  return { label: t("后台待命"), className: "idle" };
 }
 
 function getSession(slug) {
@@ -302,7 +321,7 @@ async function api(path, options = {}) {
     },
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
+  if (!response.ok) throw new Error(errorText(data.error) || t`请求失败 (${response.status})`);
   return data;
 }
 
@@ -312,22 +331,55 @@ function createClientId() {
 }
 
 function getOrCreateClientId() {
+  let session, local, previous;
+  try { session = sessionStorage; } catch {}
+  try { local = localStorage; } catch {}
+  const prefix = "codex-terminal-hub:";
   try {
-    const prefix = "codex-terminal-hub:";
-    if (window.name.startsWith(prefix)) {
-      const stored = window.name.slice(prefix.length);
-      if (/^[A-Za-z0-9_-]{16,128}$/.test(stored)) return stored;
-    }
-    const id = createClientId();
-    window.name = `${prefix}${id}`;
-    return id;
-  } catch {
-    return createClientId();
+    if (window.name.startsWith(prefix)) previous = window.name.slice(prefix.length);
+  } catch {}
+  const id = pageIdentity({ standalone: isStandaloneApp(), session, local, previous, createId: createClientId });
+  try { window.name = `${prefix}${id}`; } catch {}
+  return id;
+}
+
+function isStandaloneApp() {
+  return navigator.standalone === true || matchMedia("(display-mode: standalone)").matches;
+}
+
+function rememberedSession() {
+  const requested = new URLSearchParams(location.search).get("session");
+  if (requested && getSession(requested)) return requested;
+  try {
+    const slug = (isStandaloneApp() ? localStorage : sessionStorage).getItem("codex-terminal-last-session");
+    if (getSession(slug)) return slug;
+  } catch {}
+  return null;
+}
+
+async function restoreClaimedSession({ refresh = false } = {}) {
+  const restoreSelection = refresh || !state.sessions.length;
+  markActivity();
+  checkStreamHealth();
+  if (refresh || !state.sessions.length) await refreshSessions();
+  if (!state.clientActive) return;
+  if (restoreSelection && state.mode === "overview") {
+    const slug = rememberedSession();
+    if (slug) openSession(slug);
   }
+  syncVisibleTerminals();
 }
 
 function telemetry() {
   return {
+    connection: {
+      version: "20261117-frozen-history", standalone: isStandaloneApp(),
+      timings: bootTimings,
+      socketState: state.stream?.readyState ?? -1, ready: state.streamReady,
+      verifying: Boolean(foregroundRecovery), idle: state.idleSuspended,
+      sessionSelected: Boolean(state.activeSlug),
+      inputReady: Boolean(terminalViews.get(state.activeSlug)?.inputReady),
+    },
     visible: !document.hidden,
     focused: document.hasFocus(),
     lastActivityAt: state.lastActivityAt,
@@ -335,65 +387,190 @@ function telemetry() {
 }
 
 function presenceLabel(status) {
-  if (!status?.occupied) return "等待连接";
-  if (status.phase === "grace") return `断线保护 ${Math.max(1, Math.ceil(status.graceRemainingMs / 1000))} 秒`;
-  if (status.phase === "stale") return "原页面已离线";
-  if (status.inUse) return "另一页面正在使用";
-  if (status.displayed) return "另一页面正在展示";
-  return "另一页面在后台";
+  if (!status?.occupied) return t("等待连接");
+  if (status.phase === "grace") return t`断线保护 ${Math.max(1, Math.ceil(status.graceRemainingMs / 1000))} 秒`;
+  if (status.phase === "stale") return t("原页面已离线");
+  if (status.inUse) return t("另一页面正在使用");
+  if (status.displayed) return t("另一页面正在展示");
+  return t("另一页面在后台");
 }
 
 function showTakeover(status) {
+  document.getElementById("connectionProgress").hidden = true;
   inputDelivery.fail();
   state.clientActive = false;
   state.clientStatus = status;
   closeStream(false);
   elements.connectionDot.classList.remove("online");
-  elements.clientTakeoverTitle.textContent = status?.occupied ? "另一页面已连接" : "终端等待连接";
+  elements.clientTakeoverTitle.textContent = status?.occupied ? t("另一页面已连接") : t("终端等待连接");
   elements.clientPresenceLabel.textContent = presenceLabel(status);
   elements.clientPresenceDot.className = `client-presence-dot ${status?.phase || "stale"}`;
   elements.clientTakeoverMessage.textContent = status?.phase === "grace"
-    ? "原页面可能只是短暂断网，服务仍在保护窗口内。需要切换到这里时，请手动重新连接。"
-    : "tmux 和 Codex 仍在后台运行。点击重新连接后，本页面会成为唯一活动页面。";
+    ? t("原页面可能只是短暂断网，服务仍在保护窗口内。需要切换到这里时，请手动重新连接。")
+    : t("tmux 和 Codex 仍在后台运行。点击重新连接后，本页面会成为唯一活动页面。");
   elements.clientTakeover.hidden = false;
   updateComposerConnection();
 }
 
-async function claimBrowser({ force = false } = {}) {
-  const result = await api("/api/client/claim", {
-    method: "POST",
-    body: JSON.stringify({ clientId: state.clientId, force, ...telemetry() }),
+let claimEpoch = 0;
+let claimPending = 0;
+let foregroundRecovery = null;
+let foregroundRecoveryNeeded = false;
+let heartbeatInFlight = false;
+let streamProbeCounter = 0;
+let pendingStreamProbe = null;
+let connectionStep = null;
+let connectionStepAt = 0;
+let connectionProgressHide = null;
+let connectionWaiting = false;
+
+function connectionProgress(step, detail = "", waiting = false) {
+  const labels = [t("确认本页连接资格"), t("建立实时通道"), t("打开当前会话"), t("加载并显示首屏"), t("已连接，可以输入")];
+  const panel = document.getElementById("connectionProgress");
+  clearTimeout(connectionProgressHide);
+  if (connectionStep !== step || panel.hidden) connectionStepAt = Date.now();
+  connectionStep = step;
+  connectionWaiting = waiting;
+  panel.hidden = false;
+  document.getElementById("connectionProgressTitle").textContent = `${step + 1}/5 · ${labels[step]}`;
+  document.getElementById("connectionProgressDetail").textContent = detail || t("正在处理，请稍候；后台任务继续运行。");
+  panel.querySelectorAll("li").forEach((item, index) => { item.dataset.done = String(index <= step); });
+  renderConnectionProgressTime();
+  if (step === 4) connectionProgressHide = setTimeout(() => { panel.hidden = true; }, 1500);
+}
+
+function renderConnectionProgressTime() {
+  if (document.getElementById("connectionProgress").hidden) return;
+  document.getElementById("connectionProgressTime").textContent = connectionWaiting ? t("等待选择") : t`本步 ${Math.floor((Date.now() - connectionStepAt) / 1000)} 秒`;
+}
+
+function pingStream() {
+  if (pendingStreamProbe || !state.streamReady) return;
+  // Keep the outstanding probe ID so a slow but valid reply is still accepted.
+  if (state.streamProbeAt && Date.now() - state.streamProbeAt < connectionTimeouts.silent) return;
+  const clientAt = streamProbeCounter = Math.max(Date.now(), streamProbeCounter + 1);
+  state.streamProbeAt = clientAt;
+  const sessions = [...terminalViews.values()].filter(view => view.visible && view.serverActive && view.inputReady);
+  for (const view of sessions) { view.sessionProbeAt = clientAt; view.sessionCheckStartedAt ||= Date.now(); }
+  streamSend({ type: "ping", clientAt, presence: telemetry(), sessions: sessions.map(view => view.slug) });
+}
+
+function verifyForegroundStream() {
+  pendingStreamProbe?.finish(false);
+  if (!state.streamReady || state.stream?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const socket = state.stream;
+    const clientAt = streamProbeCounter = Math.max(Date.now(), streamProbeCounter + 1);
+    const timer = setTimeout(() => finish(false), connectionTimeouts.foreground);
+    const finish = ok => {
+      clearTimeout(timer);
+      if (pendingStreamProbe?.clientAt === clientAt) pendingStreamProbe = null;
+      resolve(ok && state.stream === socket);
+    };
+    pendingStreamProbe = { clientAt, finish };
+    state.streamProbeAt = clientAt;
+    const sessions = [...terminalViews.values()].filter(view => view.visible && view.serverActive && view.inputReady);
+    for (const view of sessions) { view.sessionProbeAt = clientAt; view.sessionCheckStartedAt ||= Date.now(); }
+    if (!streamSend({ type: "ping", clientAt, presence: telemetry(), sessions: sessions.map(view => view.slug) })) finish(false);
   });
-  state.clientStatus = result;
-  if (!result.active) {
-    showTakeover(result);
-    return false;
+}
+
+async function recoverClaimedStream() {
+  // Do not cancel a fresh handshake: its delayed upgrade can arrive after
+  // the replacement and evict the newer socket on a slow network.
+  if (state.stream?.readyState === WebSocket.CONNECTING
+    && Date.now() - state.streamStartedAt < connectionTimeouts.handshake) return true;
+  const epoch = claimEpoch;
+  const socket = state.stream;
+  const verified = await verifyForegroundStream();
+  if (!state.clientActive || epoch !== claimEpoch) return false;
+  if (!verified && state.stream === socket) {
+    inputDelivery.fail();
+    closeStream(false);
   }
-  state.clientActive = true;
-  elements.clientTakeover.hidden = true;
-  elements.connectionDot.classList.add("online");
-  elements.connectionDot.title = "控制连接已建立";
   connectStream();
-  updateComposerConnection();
   return true;
 }
 
+async function claimBrowser({ force = false, reason = "open", connect = true } = {}) {
+  connectionProgress(0, force ? t("正在将控制权交给本页。") : t("只有本页获准后才开始连接终端。") );
+  const epoch = ++claimEpoch;
+  claimPending++;
+  try {
+    const result = await api("/api/client/claim", {
+      method: "POST",
+      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ clientId: state.clientId, force, reason, ...telemetry() }),
+    });
+    if (epoch !== claimEpoch) return false;
+    state.clientStatus = result;
+    if (!result.active) {
+      showTakeover(result);
+      return false;
+    }
+    state.clientActive = true;
+    elements.clientTakeover.hidden = true;
+    elements.connectionDot.classList.add("online");
+    elements.connectionDot.title = t("控制连接已建立");
+    if (connect) connectStream();
+    updateComposerConnection();
+    return true;
+  } finally { claimPending--; }
+}
+
+function resumeForeground() {
+  if (document.hidden || !state.clientId || claimPending) return Promise.resolve(false);
+  if (foregroundRecovery) return foregroundRecovery;
+  claimEpoch++; // Ignore HTTP heartbeat responses from before this recovery.
+  foregroundRecoveryNeeded = true;
+  foregroundRecovery = (async () => {
+    // A non-forced claim is accepted only for the current owner or an empty
+    // server. Never steal ownership back from a newer manually claimed page.
+    // Existing owner reconnects directly; the upgrade validates ownership.
+    // HTTP claim is only required on first entry or after loss of ownership.
+    const accepted = state.clientActive || await claimBrowser({ reason: "foreground", connect: false });
+    foregroundRecoveryNeeded = false;
+    if (!accepted) return false;
+    if (!(await recoverClaimedStream())) return false;
+    await restoreClaimedSession();
+    return true;
+  })().catch(() => {
+    // A failed foreground request is retried by subsequent heartbeats.
+    foregroundRecoveryNeeded = true;
+    elements.connectionDot.classList.remove("online");
+    return false;
+  }).finally(() => { foregroundRecovery = null; });
+  return foregroundRecovery;
+}
+
 async function heartbeat() {
-  if (!state.clientId) return;
+  if (!state.clientId || claimPending || foregroundRecovery || heartbeatInFlight) return;
+  // One live WS probe carries both presence and terminal readiness. No
+  // parallel HTTP polling for healthy or unapproved pages.
+  if (state.streamReady || (!state.clientActive && !foregroundRecoveryNeeded)) return;
+  heartbeatInFlight = true;
+  const epoch = claimEpoch;
   try {
     const status = await api("/api/client/heartbeat", {
       method: "POST",
+      signal: AbortSignal.timeout(8000),
       body: JSON.stringify({ clientId: state.clientId, ...telemetry() }),
     });
+    if (epoch !== claimEpoch || claimPending) return;
+    if (!document.hidden && (!status.occupied || foregroundRecoveryNeeded || (status.active && !state.clientActive))) {
+      await resumeForeground();
+      return;
+    }
     if (!status.active && state.clientActive) showTakeover(status);
     else if (!state.clientActive) {
       state.clientStatus = status;
       elements.clientPresenceLabel.textContent = presenceLabel(status);
     }
   } catch {
+    if (epoch !== claimEpoch || claimPending) return;
     elements.connectionDot.classList.remove("online");
     updateComposerConnection();
-  }
+  } finally { heartbeatInFlight = false; }
 }
 
 function streamSend(payload) {
@@ -404,18 +581,23 @@ function streamSend(payload) {
 
 function streamUrl() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${location.host}/api/terminal-stream?clientId=${encodeURIComponent(state.clientId)}`;
+  return `${protocol}//${location.host}/api/terminal-stream?clientId=${encodeURIComponent(state.clientId)}&attempt=${state.streamGeneration}`;
 }
 
 function connectStream() {
   if (!state.clientActive || [WebSocket.OPEN, WebSocket.CONNECTING].includes(state.stream?.readyState)) return;
+  connectionProgress(1, t("本页已获准，正在连接服务端。历史缓存稍后加载。") );
   clearTimeout(state.streamTimer);
   state.streamReady = false;
   resetSessionLatency();
+  state.streamGeneration = Math.max(Date.now(), (state.streamGeneration || 0) + 1);
   const socket = new WebSocket(streamUrl());
   state.stream = socket;
+  state.streamStartedAt = Date.now();
+  state.streamPongAt = 0;
+  state.streamProbeAt = 0;
   socket.addEventListener("open", () => {
-    state.streamAttempt = 0;
+    if (state.stream !== socket) return;
     elements.connectionDot.classList.add("online");
     updateComposerConnection();
   });
@@ -424,15 +606,18 @@ function connectStream() {
     try {
       handleStreamMessage(JSON.parse(event.data));
     } catch (error) {
-      showToast(`终端数据错误：${error.message}`, "error");
+      showToast(t`终端数据错误：${error.message}`, "error");
     }
   });
   socket.addEventListener("close", (event) => {
     if (state.stream !== socket) return;
+    inputDelivery.fail();
     state.streamReady = false;
     for (const view of terminalViews.values()) {
       view.serverActive = false;
       view.inputReady = false;
+      view.lastSentCols = 0;
+      view.lastSentRows = 0;
     }
     elements.connectionDot.classList.remove("online");
     resetSessionLatency();
@@ -442,13 +627,41 @@ function connectStream() {
       return;
     }
     if (state.clientActive) {
+      connectionProgress(1, t`通道已断开（${event.code}），正在自动重试；不会重发输入。`);
       const delay = Math.min(10000, 500 * (2 ** state.streamAttempt++));
       state.streamTimer = setTimeout(connectStream, delay);
     }
   });
 }
 
+function checkStreamHealth() {
+  if (!state.clientActive || document.hidden || claimPending || pendingStreamProbe || foregroundRecovery) return;
+  if (!state.stream) {
+    if (!state.streamTimer) connectStream();
+    return;
+  }
+  const failure = connectionFailure({
+    now: Date.now(), startedAt: state.streamStartedAt, ready: state.streamReady,
+    pongAt: state.streamPongAt, subscriptions: [...terminalViews.values()],
+  });
+  if (!failure) return;
+  const failureMessage = t(failure);
+  // Retire the old socket immediately: Safari may never deliver its close event.
+  // Never replay input whose delivery is uncertain.
+  inputDelivery.fail();
+  closeStream(false);
+  elements.connectionDot.classList.remove("online");
+  const delay = Math.min(10000, 500 * (2 ** Math.min(state.streamAttempt++, 5)));
+  showToast(t`${failureMessage}，正在重新连接`, "error");
+  connectionProgress(1, t`${failureMessage}，正在更换连接。`);
+  state.streamTimer = setTimeout(() => {
+    state.streamTimer = null;
+    connectStream();
+  }, delay);
+}
+
 function closeStream(clearClient = true) {
+  pendingStreamProbe?.finish(false);
   tmuxClipboard.cancel();
   tmuxCopyGesture = null;
   clearTimeout(state.streamTimer);
@@ -461,6 +674,8 @@ function closeStream(clearClient = true) {
   for (const view of terminalViews.values()) {
     view.serverActive = false;
     view.inputReady = false;
+    view.lastSentCols = 0;
+    view.lastSentRows = 0;
   }
   resetSessionLatency();
   updateComposerConnection();
@@ -469,14 +684,16 @@ function closeStream(clearClient = true) {
 const sessionProbeTimeoutMs = 12000;
 
 function sessionLatency(view) {
-  if (!state.clientActive || !state.streamReady || state.stream?.readyState !== WebSocket.OPEN) return "已断开";
-  if (view?.sessionConnected === false || ["会话已结束", "连接错误"].includes(view?.flowState)) return "已断开";
-  if (!view || !view.serverActive || !view.inputReady) return "未连接";
-  if (inputFailures.has(view.slug)) return "输入未确认";
+  if (foregroundRecovery || pendingStreamProbe) return t("确认连接中");
+  if (!state.clientActive || !state.streamReady || state.stream?.readyState !== WebSocket.OPEN) return t("已断开");
+  if (view?.sessionConnected === false || [t("会话已结束"), t("连接错误")].includes(view?.flowState)) return t("已断开");
+  if (!view || !view.serverActive || !view.inputReady) return t("未连接");
+  if (inputFailures.has(view.slug)) return t("输入未确认");
   const now = Date.now();
-  if ((view.sessionPongAt && now - view.sessionPongAt > sessionProbeTimeoutMs)
-    || (!view.sessionPongAt && view.sessionCheckStartedAt && now - view.sessionCheckStartedAt > sessionProbeTimeoutMs)) return "连接无响应";
-  if (!view.sessionPongAt || view.sessionLatencyMs == null) return "确认连接中";
+  if (now - (state.streamPongAt || state.streamStartedAt) > connectionTimeouts.slow
+    || (view.sessionPongAt && now - view.sessionPongAt > connectionTimeouts.slow)
+    || (!view.sessionPongAt && view.sessionCheckStartedAt && now - view.sessionCheckStartedAt > connectionTimeouts.slow)) return t("响应较慢");
+  if (!view.sessionPongAt || view.sessionLatencyMs == null) return t("确认连接中");
   return `${Math.round(view.sessionLatencyMs)} ms`;
 }
 
@@ -509,18 +726,28 @@ function handleStreamMessage(message) {
     view.sessionConnected = message.connected === true;
     view.sessionPongAt = message.connected ? Date.now() : 0;
     view.sessionLatencyMs = message.connected ? Date.now() - message.clientAt : null;
+    if (message.connected && bootTimings.firstInteractiveMs === null) bootTimings.firstInteractiveMs = Math.round(performance.now());
+    if (view.visible && message.connected && connectionStep !== 4) connectionProgress(4, t("当前会话已确认可操作，历史在后台按需加载。") );
     updateTerminalStatus(view);
     updateTerminalSubtitle();
     updateComposerConnection();
+    if (message.connected) scheduleHistoryPreload(view);
     return;
   }
   if (message.type === "pong") {
+    if (message.clientAt !== state.streamProbeAt) return;
+    state.streamProbeAt = 0;
+    state.streamPongAt = Date.now();
+    state.streamAttempt = 0;
+    pendingStreamProbe?.finish(true);
+    for (const session of message.sessions || []) handleStreamMessage({ type: "session-pong", session: session.session, clientAt: message.clientAt, connected: session.connected });
     return;
   }
   if (message.type === "ready") {
     state.streamReady = true;
-    streamSend({ type: "ping", clientAt: Date.now() });
+    pingStream();
     syncVisibleTerminals();
+    if (!visibleSessions().length) connectionProgress(2, t("实时通道已建立；请选择要打开的 session，或新建一个。"), true);
     updateComposerConnection();
     return;
   }
@@ -544,8 +771,11 @@ function completeComposerInput(pending) {
     writeInputDraft(pending.sessionSlug, "");
   }
   const session = getSession(pending.sessionSlug);
-  showToast(`已发送到 ${sessionLabel(session)}`);
-  elements.terminalInput.focus({ preventScroll: true });
+  showToast(t`已发送到 ${sessionLabel(session)}`);
+  // A late ACK must not reopen a keyboard the user has already dismissed.
+  if ([elements.terminalInput, elements.sendInputButton].includes(document.activeElement)) {
+    elements.terminalInput.focus({ preventScroll: true });
+  }
   updateComposerConnection();
 }
 
@@ -554,7 +784,7 @@ function handleSessionMessage(message) {
     && (!message.session || message.session === inputDelivery.job.sessionSlug)) inputDelivery.fail();
   const view = terminalViews.get(message.session);
   if (!view) {
-    if (message.type === "error") showToast(message.message || "终端连接错误", "error");
+    if (message.type === "error") showToast(message.message || t("终端连接错误"), "error");
     return;
   }
   if (message.type === "clipboard") {
@@ -566,13 +796,16 @@ function handleSessionMessage(message) {
     return;
   }
   if (message.type === "snapshot") {
-    view.flowState = "同步缓存";
+    if (view.visible) connectionProgress(3, t("首屏已收到，正在渲染并确认输入通道。") );
+    const sourceSocket = state.stream;
+    view.flowState = t("同步缓存");
     updateTerminalStatus(view);
     view.term.reset();
     view.term.write(message.data || "", () => {
+      if (state.stream !== sourceSocket || !view.serverActive) return;
       view.lastSeq = message.seq;
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
-      view.flowState = "实时";
+      view.flowState = t("实时");
       view.inputReady = true;
       probeSession(view);
       if (!view.historyActive) view.term.scrollToBottom();
@@ -583,17 +816,21 @@ function handleSessionMessage(message) {
     return;
   }
   if (message.type === "output") {
+    const sourceSocket = state.stream;
     view.liveOutputBytes += (message.data || "").length;
+    view.lastOutputAt = Date.now();
     view.term.write(message.data || "", () => {
+      if (state.stream !== sourceSocket || !view.serverActive) return;
       view.lastSeq = message.seq;
       streamSend({ type: "ack", session: view.slug, seq: message.seq });
       if (!view.historyActive) view.term.scrollToBottom();
+      if (state.keyboardOpen || mobileSessionInputFocused()) syncTerminalBottom(view);
       updateTerminalStatus(view);
     });
     return;
   }
   if (message.type === "flow") {
-    view.flowState = message.state === "buffering" ? "正在稳流" : "实时";
+    view.flowState = message.state === "buffering" ? t("正在稳流") : t("实时");
     updateTerminalStatus(view);
     return;
   }
@@ -602,10 +839,10 @@ function handleSessionMessage(message) {
     view.sessionLatencyMs = null;
     updateTerminalSubtitle();
     updateComposerConnection();
-    view.flowState = "会话已结束";
-    view.term.write("\r\n\x1b[33m[tmux 会话已结束；终端连接已关闭]\x1b[0m\r\n");
+    view.flowState = t("会话已结束");
+    view.term.write(t("\r\n\x1b[33m[tmux 会话已结束；终端连接已关闭]\x1b[0m\r\n"));
     updateTerminalStatus(view);
-    showToast("tmux session 已结束，正在返回总览");
+    showToast(t("tmux session 已结束，正在返回总览"));
     setTimeout(() => refreshSessions({ quiet: true }), 2500);
     return;
   }
@@ -614,9 +851,9 @@ function handleSessionMessage(message) {
     view.sessionLatencyMs = null;
     updateTerminalSubtitle();
     updateComposerConnection();
-    view.flowState = "连接错误";
+    view.flowState = t("连接错误");
     updateTerminalStatus(view);
-    showToast(message.message || "终端连接错误", "error");
+    showToast(message.message || t("终端连接错误"), "error");
   }
 }
 
@@ -627,11 +864,11 @@ function updateTerminalStatus(view) {
       : 0;
     const newOutputBytes = Math.max(0, view.liveOutputBytes - view.historyLiveBaseline);
     const earlierState = view.historyLoadingEarlier
-      ? " · 加载更早内容…"
-      : view.historyHasEarlier ? " · 顶部继续加载" : " · 已到最早";
+      ? t(" · 加载更早内容…")
+      : view.historyHasEarlier ? t(" · 顶部继续加载") : t(" · 已到最早");
     view.status.textContent = view.historyOpening
-      ? "正在冻结当前屏幕…"
-      : `缓存 · 冻结 ${ageSeconds}s${newOutputBytes ? ` · +${compactBytes(newOutputBytes)}` : ""}${earlierState} · 回实时`;
+      ? t("正在冻结当前屏幕…")
+      : t`缓存 · 冻结 ${ageSeconds}s${newOutputBytes ? ` · +${compactBytes(newOutputBytes)}` : ""}${earlierState} · 回实时`;
     view.status.classList.add("history");
     view.status.hidden = false;
     return;
@@ -640,10 +877,10 @@ function updateTerminalStatus(view) {
   view.behind = behind;
   const latency = sessionLatency(view);
   view.status.textContent = behind > 0
-    ? `缓存历史 · 距实时 ${behind} 行`
-    : view.flowState === "实时"
-      ? `${view.historyReady ? "缓存已就绪" : "缓存建立中"} · 延迟 ${latency}`
-      : `${view.flowState} · 延迟 ${latency}`;
+    ? t`缓存历史 · 距实时 ${behind} 行`
+    : view.flowState === t("实时")
+      ? t`${view.historyReady ? t("缓存已就绪") : t("缓存建立中")} · 延迟 ${latency}`
+      : t`${view.flowState} · 延迟 ${latency}`;
   view.status.classList.toggle("history", behind > 0);
   view.status.hidden = false;
 }
@@ -653,8 +890,27 @@ function updateTerminalSubtitle() {
   if (!sessions.length) return;
   const latency = sessionLatency(terminalViews.get(state.targetSlug || sessions[0].slug));
   elements.viewSubtitle.textContent = sessions.length === 1
-    ? `延迟 ${latency} · 滚动缓存按需加载 · ${compactPath(sessions[0].path)}`
-    : `延迟 ${latency} · 一条连接 · ${sessions.length} 个 tmux sessions`;
+    ? t`延迟 ${latency} · 滚动缓存按需加载 · ${compactPath(sessions[0].path)}`
+    : t`延迟 ${latency} · 一条连接 · ${sessions.length} 个 tmux sessions`;
+}
+
+function scheduleHistoryPreload(view) {
+  if (view.historyReady || view.historyPromise || view.historyPreloadTimer
+    || view.historyActive || view.historyOpening || !view.visible || document.hidden
+    || Date.now() < (view.historyRetryAt || 0)) return;
+  const socket = state.stream;
+  view.historyPreloadTimer = setTimeout(async () => {
+    view.historyPreloadTimer = null;
+    if (terminalViews.get(view.slug) !== view || state.stream !== socket
+      || !state.streamReady || !view.serverActive || !view.inputReady
+      || view.sessionConnected !== true || !sessionLatency(view).endsWith(" ms")
+      || !view.visible || document.hidden || view.historyReady || view.historyPromise
+      || view.historyActive || view.historyOpening) return;
+    // Use the cache endpoint: it registers background interest and reuses a
+    // captured page. Explicit history browsing still requests a fresh capture.
+    const snapshot = await loadHistoryCache(view);
+    view.historyRetryAt = snapshot ? 0 : Date.now() + 15000;
+  }, 1000);
 }
 
 async function loadHistoryCache(view, { refresh = false } = {}) {
@@ -662,19 +918,20 @@ async function loadHistoryCache(view, { refresh = false } = {}) {
     const pending = await view.historyPromise;
     if (!refresh) return pending;
   }
-  view.historyPromise = api(`/api/sessions/${view.slug}/history${refresh ? "?refresh=1" : ""}`)
+  view.historyPromise = api(`/api/sessions/${view.slug}/history${refresh ? "?refresh=1" : ""}`, { signal: AbortSignal.timeout(15000) })
     .then(async (snapshot) => {
       if (snapshot.pending) {
         await new Promise((resolve) => setTimeout(resolve, Math.max(120, snapshot.retryAfterMs || 120)));
-        return api(`/api/sessions/${view.slug}/history`);
+        return api(`/api/sessions/${view.slug}/history`, { signal: AbortSignal.timeout(15000) });
       }
       return snapshot;
     })
     .then((snapshot) => {
-      if (!snapshot || snapshot.pending || typeof snapshot.content !== "string") throw new Error("最新缓存尚未就绪，请稍后重试");
+      if (!snapshot || snapshot.pending || typeof snapshot.content !== "string") throw new Error(t("最新缓存尚未就绪，请稍后重试"));
       if (!refresh && view.historyCapturedAt === snapshot.capturedAt) return snapshot;
       view.historyCapturedAt = snapshot.capturedAt;
       view.historyContent = snapshot.content;
+      view.historySnapshotId = snapshot.snapshotId;
       view.historyNextBefore = snapshot.nextBefore ?? null;
       view.historyHasEarlier = Boolean(snapshot.hasEarlier && snapshot.nextBefore !== null);
       view.historyReady = false;
@@ -698,6 +955,7 @@ async function loadHistoryCache(view, { refresh = false } = {}) {
 }
 
 async function loadEarlierHistory(view) {
+  if (historyTextSelected(view)) return;
   if (!view.historyActive || view.historyOpening || view.historyLoadingEarlier || !view.historyHasEarlier || view.historyNextBefore === null || composerHasFocus()) return;
   const generation = view.historyGeneration;
   view.historyLoadingEarlier = true;
@@ -705,9 +963,10 @@ async function loadEarlierHistory(view) {
   const before = view.historyNextBefore;
   let pageAdvanced = false;
   try {
-    const page = await api(`/api/sessions/${view.slug}/history?before=${encodeURIComponent(before)}`);
+    const page = await api(`/api/sessions/${view.slug}/history?before=${encodeURIComponent(before)}&snapshot=${encodeURIComponent(view.historySnapshotId || "")}`);
+    if (page.snapshotId !== view.historySnapshotId) throw new Error("History snapshot changed; return to live and reopen history.");
     // Discard responses from a reading session exited while the request ran.
-    if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus()) return;
+    if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus() || historyTextSelected(view)) return;
     if (!page?.content || !page.lines) {
       view.historyHasEarlier = false;
       view.historyNextBefore = null;
@@ -731,7 +990,7 @@ async function loadEarlierHistory(view) {
     try {
       ensureHistoryScrollback({ historyTerm: nextTerm }, content);
       await new Promise(resolve => nextTerm.write(content, resolve));
-      if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus()) return;
+      if (!view.historyActive || view.historyGeneration !== generation || composerHasFocus() || historyTextSelected(view)) return;
       const oldTerm = view.historyTerm;
       const top = oldTerm.buffer.active.viewportY;
       const addedRows = nextTerm.buffer.active.length - oldTerm.buffer.active.length;
@@ -747,6 +1006,7 @@ async function loadEarlierHistory(view) {
       view.historyRenderHost = stagingHost;
       stagingHost.style.cssText = "position:absolute;inset:0";
       installed = true;
+      refreshNativeHistory(view);
     } finally {
       if (!installed) { nextTerm.dispose(); stagingHost.remove(); }
     }
@@ -756,7 +1016,7 @@ async function loadEarlierHistory(view) {
     view.historyError = null;
   } catch (error) {
     view.historyError = error.message || `${error}`;
-    showToast(`历史缓存加载失败：${view.historyError}`, "error");
+    showToast(t`历史缓存加载失败：${view.historyError}`, "error");
   } finally {
     view.historyLoadingEarlier = false;
     if (view.historyActive && view.historyGeneration === generation) fitTerminal(view);
@@ -771,7 +1031,7 @@ async function loadEarlierHistory(view) {
   }
 }
 
-async function openHistoryCache(view) {
+async function openHistoryCache(view, { native = true } = {}) {
   if (composerHasFocus() || !view.visible) return false;
   if (view.historyActive) return true;
   const generation = ++view.historyGeneration;
@@ -796,7 +1056,7 @@ async function openHistoryCache(view) {
     view.historyLayer.hidden = true;
     view.historyLayer.removeAttribute("aria-busy");
     updateTerminalStatus(view);
-    showToast(view.historyError || "历史缓存仍在建立，请稍后再试", "error");
+    showToast(view.historyError || t("历史缓存仍在建立，请稍后再试"), "error");
     return false;
   }
   if (!view.historyActive) return false;
@@ -808,6 +1068,9 @@ async function openHistoryCache(view) {
     view.historyTerm.scrollLines(-4);
     view.historyOpening = false;
     view.historyLayer.removeAttribute("aria-busy");
+    if (native && navigator.maxTouchPoints > 0 && window.matchMedia("(max-width: 900px)").matches) {
+      showHistorySelection(view, nativeHistoryText(view), { reader: true });
+    }
     updateTerminalStatus(view);
   });
   updateTerminalStatus(view);
@@ -944,7 +1207,7 @@ function ensureTerminalView(session) {
   let view = terminalViews.get(session.slug);
   if (view) {
     view.name.textContent = sessionLabel(session);
-    view.name.title = `原名：${session.name}`;
+    view.name.title = t`原名：${session.name}`;
     view.path.textContent = compactPath(activeWindow(session)?.path || session.path);
     return view;
   }
@@ -952,7 +1215,7 @@ function ensureTerminalView(session) {
   panel.className = "terminal-panel";
   panel.dataset.terminalPanel = session.slug;
   panel.hidden = true;
-  panel.innerHTML = `
+  panel.innerHTML = t`
     <header class="terminal-panel-heading">
       <strong data-terminal-name title="原名：${escapeHtml(session.name)}">${escapeHtml(sessionLabel(session))}</strong>
       <span data-terminal-path>${escapeHtml(compactPath(activeWindow(session)?.path || session.path))}</span>
@@ -998,12 +1261,13 @@ function ensureTerminalView(session) {
     path: panel.querySelector("[data-terminal-path]"),
     status: panel.querySelector(".terminal-history-status"),
     visible: false, serverActive: false, lastVisibleAt: Date.now(), lastSeq: 0,
-    flowState: "连接中", behind: 0, fitTimer: null,
+    flowState: t("连接中"), behind: 0, fitTimer: null,
     historyActive: false, historyOpening: false, historyReady: false, historyPromise: null,
     historyGeneration: 0, cancelHistoryGestures: [],
     historyCapturedAt: null, historyFrozenAt: null, historyError: null,
     historyContent: "", historyNextBefore: null, historyHasEarlier: false, historyLoadingEarlier: false,
-    liveOutputBytes: 0, historyLiveBaseline: 0, inputReady: false,
+    liveOutputBytes: 0, lastOutputAt: 0, lastKeyboardLift: 0, lastSentCols: 0, lastSentRows: 0,
+    historyLiveBaseline: 0, inputReady: false,
   };
   terminalViews.set(session.slug, view);
   for (const eventName of ["pointerdown", "focusin"]) {
@@ -1024,18 +1288,25 @@ function ensureTerminalView(session) {
   term.onData((data) => {
     if (isTerminalProtocolReply(data)) return;
     state.lastActivityAt = Date.now();
-    if (!streamSend({ type: "input", session: view.slug, data })) showToast("终端正在重连，请稍后重试", "error");
+    if (!streamSend({ type: "input", session: view.slug, data })) showToast(t("终端正在重连，请稍后重试"), "error");
   });
   term.onBinary((data) => {
     if (!streamSend({ type: "input", session: view.slug, data: btoa(data), encoding: "base64" })) {
-      showToast("终端正在重连，请稍后重试", "error");
+      showToast(t("终端正在重连，请稍后重试"), "error");
     }
   });
   term.onResize(({ cols, rows }) => {
     term.options.scrollback = Math.max(200, rows * 9);
-    if (view.serverActive) streamSend({ type: "resize", session: view.slug, cols, rows });
+    if (view.serverActive && (cols !== view.lastSentCols || rows !== view.lastSentRows)) {
+      view.lastSentCols = cols;
+      view.lastSentRows = rows;
+      streamSend({ type: "resize", session: view.slug, cols, rows });
+    }
   });
   term.onScroll(() => updateTerminalStatus(view));
+  term.onRender(() => {
+    if (state.keyboardOpen || mobileSessionInputFocused()) syncTerminalBottom(view);
+  });
   view.status.addEventListener("click", () => {
     if (view.historyActive) returnToLive(view);
     else openHistoryCache(view);
@@ -1048,7 +1319,7 @@ function ensureTerminalView(session) {
     return true;
   });
   panel.querySelector(".terminal-search").addEventListener("click", () => {
-    const needle = prompt("查找当前终端缓存中的文字：");
+    const needle = prompt(t("查找当前终端缓存中的文字："));
     if (needle) (view.historyActive ? view.historySearch : search).findNext(needle, {
       incremental: true,
       decorations: { matchBackground: "#705d19", activeMatchBackground: "#4a8067" },
@@ -1069,7 +1340,7 @@ function ensureTerminalView(session) {
   view.resizeObserver = resizeObserver;
   installTouchScroller(view, host, () => view.historyActive ? view.historyTerm : term, { openHistoryOnUp: true });
   installTouchScroller(view, historyHost, () => view.historyTerm);
-  loadHistoryCache(view, { refresh: true });
+  // Defer background history transfer until the live first screen is usable.
   return view;
 }
 
@@ -1085,9 +1356,72 @@ function syncTerminalBottom(view) {
   const padding = getComputedStyle(view.host);
   const available = Math.max(0, view.host.clientHeight
     - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom));
+  const availableWidth = Math.max(0, view.host.clientWidth
+    - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight));
+  const keyboardInput = state.keyboardOpen || mobileSessionInputFocused();
+  // Fit the existing columns using xterm's own font metrics, not CSS scale:
+  // xterm's mouse/selection coordinates do not compensate for a CSS transform.
+  // The input and footer remain in one grid; no PTY resize or line reflow.
+  if (keyboardInput && screen.offsetWidth > 0 && availableWidth > 0) {
+    view.keyboardFont ??= { size: view.term.options.fontSize, width: screen.offsetWidth };
+    const fontSize = Math.max(1, Math.min(view.keyboardFont.size,
+      Math.floor(view.keyboardFont.size * availableWidth / view.keyboardFont.width)));
+    if (view.term.options.fontSize !== fontSize) view.term.options.fontSize = fontSize;
+  } else if (!keyboardInput && view.keyboardFont) {
+    view.term.options.fontSize = view.keyboardFont.size;
+    view.keyboardFont = null;
+  }
   const screenHeight = screen.offsetHeight;
-  const lift = (state.keyboardOpen || mobileSessionInputFocused())
-    ? Math.max(0, screenHeight - available) : 0;
+  let lift = 0;
+  if (keyboardInput) {
+    const buffer = view.term.buffer.active;
+    const rowHeight = screenHeight / view.term.rows;
+    const cursorRow = Math.max(0, Math.min(view.term.rows - 1,
+      buffer.baseY + buffer.cursorY - buffer.viewportY));
+    let lastContentRow = cursorRow;
+    for (let row = view.term.rows - 1; row > cursorRow; row--) {
+      if (buffer.getLine(buffer.viewportY + row)?.translateToString(true).trim()) {
+        lastContentRow = row;
+        break;
+      }
+    }
+    // Anchor occupied rows, not the unused bottom of a sparse terminal. TUIs
+    // such as agy may park the protocol cursor at row 0 while rendering their
+    // actual input/footer below it; that cursor must not veto the bottom lift.
+    lift = Math.max(0, Math.min(screenHeight - available,
+      (lastContentRow + 1) * rowHeight - available));
+    // Briefly tolerate split clear/redraw chunks, but never extend the hold
+    // with each new output. Otherwise streaming TUIs can remain clipped at an
+    // obsolete offset indefinitely. A timer also releases a final clear chunk.
+    const now = Date.now();
+    if (lift < (view.lastKeyboardLift || 0) && now - (view.lastOutputAt || 0) < 180) {
+      view.keyboardLiftDeadline ??= now + 180;
+      if (now < view.keyboardLiftDeadline) {
+        if (!view.keyboardLiftTimer) {
+          view.keyboardLiftTimer = setTimeout(() => {
+            view.keyboardLiftTimer = null;
+            syncTerminalBottom(view);
+          }, view.keyboardLiftDeadline - now + 1);
+        }
+        lift = Math.max(0, Math.min(screenHeight - available, view.lastKeyboardLift));
+      } else {
+        view.lastKeyboardLift = lift;
+        view.keyboardLiftDeadline = null;
+        clearTimeout(view.keyboardLiftTimer);
+        view.keyboardLiftTimer = null;
+      }
+    } else {
+      view.lastKeyboardLift = lift;
+      view.keyboardLiftDeadline = null;
+      clearTimeout(view.keyboardLiftTimer);
+      view.keyboardLiftTimer = null;
+    }
+  } else {
+    view.lastKeyboardLift = 0;
+    view.keyboardLiftDeadline = null;
+    clearTimeout(view.keyboardLiftTimer);
+    view.keyboardLiftTimer = null;
+  }
   // Preserve the PTY's rows/columns, but clip the TOP of its rendered screen.
   // Moving the xterm root also keeps its cursor, IME textarea and hit targets
   // in the same coordinate system. The composer retains its own grid row.
@@ -1106,7 +1440,8 @@ function fitTerminal(view) {
   try {
     syncTerminalBottom(view);
     view.fit.fit();
-    if (view.historyActive && !view.historyLoadingEarlier) {
+    syncTerminalBottom(view);
+    if (view.historyActive && !view.historyLoadingEarlier && !view.selectionLayer?.classList.contains("native-history-reader")) {
       const terminal = view.historyTerm;
       // Anchor the logical line, not distance from the changing bottom. Reflow
       // can change wrapped row counts when Safari's viewport changes size.
@@ -1133,7 +1468,11 @@ function fitTerminal(view) {
         if (view.historyActive && view.historyGeneration === generation && view.historyTerm === terminal) terminal.scrollToLine(row);
       });
     }
-    if (view.serverActive) streamSend({ type: "resize", session: view.slug, cols: view.term.cols, rows: view.term.rows });
+    if (view.serverActive && (view.term.cols !== view.lastSentCols || view.term.rows !== view.lastSentRows)) {
+      view.lastSentCols = view.term.cols;
+      view.lastSentRows = view.term.rows;
+      streamSend({ type: "resize", session: view.slug, cols: view.term.cols, rows: view.term.rows });
+    }
   } catch {}
 }
 
@@ -1145,8 +1484,10 @@ function followKeyboardViewport() {
   if (keyboardViewportFrame !== null) cancelAnimationFrame(keyboardViewportFrame);
   let lastGeometry = "";
   let blurredAt = null;
+  const root = document.documentElement;
+  let currentShift = parseFloat(root.style.getPropertyValue("--app-keyboard-shift")) || 0;
   const tick = () => {
-    const focused = document.activeElement === elements.terminalInput;
+    const focused = mobileSessionInputFocused();
     if (focused) blurredAt = null;
     else blurredAt ??= performance.now();
     const viewport = window.visualViewport;
@@ -1155,17 +1496,22 @@ function followKeyboardViewport() {
       lastGeometry = geometry;
       syncVisualViewport();
     }
-    // Safari can pan a focused input after its viewport event. Correct using
-    // the actual rendered bottom, including any previous correction, so the
-    // entire app follows the keyboard without moving the terminal's cursor.
-    const root = document.documentElement;
-    const previousShift = Number.parseFloat(root.style.getPropertyValue("--app-keyboard-shift")) || 0;
+    // Reconstruct the uncorrected composer bottom from currentShift instead of
+    // removing and re-adding --app-keyboard-shift on every 60fps animation frame.
     const bottom = (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight);
     const rect = elements.composer.getBoundingClientRect();
+    const uncorrectedBottom = rect.bottom + currentShift;
     const shift = !elements.composer.hidden && rect.height > 0
-      ? Math.max(0, rect.bottom + previousShift - bottom) : 0;
-    if (Math.abs(shift - previousShift) > 1) root.style.setProperty("--app-keyboard-shift", `${shift}px`);
+      ? Math.max(0, Math.round(uncorrectedBottom - bottom)) : 0;
+    if (shift <= 1 && currentShift !== 0) {
+      root.style.removeProperty("--app-keyboard-shift");
+      currentShift = 0;
+    } else if (shift > 1 && Math.abs(shift - currentShift) > 1) {
+      root.style.setProperty("--app-keyboard-shift", `${shift}px`);
+      currentShift = shift;
+    }
     if (!focused && performance.now() - blurredAt > 800) {
+      root.style.removeProperty("--app-keyboard-shift");
       keyboardViewportFrame = null;
       return;
     }
@@ -1195,8 +1541,13 @@ function syncVisualViewport() {
   const height = Math.max(1, Math.round(viewport?.height || window.innerHeight));
   const previousHeight = state.viewportHeight || height;
   const widthChanged = state.viewportWidth !== null && Math.abs(measuredWidth - state.viewportWidth) > 2;
-  const keyboardOpening = !widthChanged && height < previousHeight - 60;
-  const keyboardClosing = state.keyboardOpen && !keyboardOpening && height > previousHeight + 60;
+  if (state.keyboardBaseHeight === null || widthChanged || (!state.keyboardOpen && height > state.keyboardBaseHeight)) {
+    state.keyboardBaseHeight = height;
+  }
+  const baseHeight = state.keyboardBaseHeight || previousHeight;
+  const keyboardOpening = !widthChanged && (height < previousHeight - 60 || height < baseHeight - 80);
+  const keyboardClosing = state.keyboardOpen && !keyboardOpening
+    && (height > previousHeight + 60 || height >= baseHeight - 40);
   // iOS may report a narrower visual viewport while the keyboard is visible.
   // Keep the layout width stable; only an actual browser/orientation resize may
   // establish a new width.
@@ -1204,6 +1555,7 @@ function syncVisualViewport() {
     state.viewportWidth = measuredWidth;
   }
   state.keyboardOpen = keyboardOpening || (state.keyboardOpen && !keyboardClosing);
+  if (!state.keyboardOpen) state.keyboardBaseHeight = Math.max(state.keyboardBaseHeight || 0, height);
   if (!state.keyboardOpen && !composerHasFocus()) document.documentElement.style.removeProperty("--app-keyboard-shift");
   state.viewportHeight = height;
   document.documentElement.style.setProperty("--app-viewport-width", `${state.viewportWidth}px`);
@@ -1234,6 +1586,7 @@ function activateTerminalView(session) {
   requestAnimationFrame(() => {
     fitTerminal(view);
     if (!view.serverActive && state.streamReady) {
+      connectionProgress(2, t`正在打开 ${sessionLabel(session)}，只同步当前屏幕。`);
       view.inputReady = false;
       view.sessionPongAt = 0;
       view.sessionProbeAt = 0;
@@ -1241,6 +1594,9 @@ function activateTerminalView(session) {
       view.sessionLatencyMs = null;
       view.sessionConnected = null;
       view.serverActive = true;
+      view.subscriptionStartedAt = Date.now();
+      view.lastSentCols = view.term.cols;
+      view.lastSentRows = view.term.rows;
       streamSend({ type: "subscribe", session: view.slug, cols: view.term.cols, rows: view.term.rows });
     }
   });
@@ -1257,6 +1613,8 @@ function deactivateTerminalView(view) {
   view.panel.hidden = true;
   if (view.serverActive) streamSend({ type: "active", session: view.slug, active: false });
   view.serverActive = false;
+  view.lastSentCols = 0;
+  view.lastSentRows = 0;
 }
 
 function visibleSessions() {
@@ -1279,11 +1637,11 @@ function renderSessionList() {
   const filtered = state.sessions.filter((session) => `${sessionLabel(session)} ${session.name} ${session.path}`.toLowerCase().includes(query));
   elements.sessionList.innerHTML = filtered.length ? filtered.map((session) => {
     const status = sessionStatus(session);
-    return `<div class="session-list-row"><button class="session-item ${state.activeSlug === session.slug ? "active" : ""}" data-open-session="${session.slug}" title="原名：${escapeHtml(session.name)}">
+    return t`<div class="session-list-row"><button class="session-item ${state.activeSlug === session.slug ? "active" : ""}" data-open-session="${session.slug}" title="原名：${escapeHtml(session.name)}">
       <span class="status-dot ${status.className}"></span><span class="session-copy"><strong>${escapeHtml(sessionLabel(session))}</strong>
       <small>${escapeHtml(compactPath(session.path))}</small></span><span class="session-badge">${session.windows}W</span></button>
       <button class="session-label-edit" data-edit-label="${session.slug}" title="修改显示名称" aria-label="修改 ${escapeHtml(sessionLabel(session))} 的显示名称">✎</button></div>`;
-  }).join("") : `<div class="session-list-empty">${state.sessions.length ? "没有匹配的会话" : "还没有 tmux session"}</div>`;
+  }).join("") : `<div class="session-list-empty">${state.sessions.length ? t("没有匹配的会话") : t("还没有 tmux session")}</div>`;
   requestAnimationFrame(syncSessionScrollbar);
 }
 
@@ -1340,7 +1698,7 @@ function renderOverview() {
     const status = sessionStatus(session);
     const window = activeWindow(session);
     const selected = state.multiSelection.has(session.slug);
-    return `<article class="session-card ${selected ? "selected" : ""}">
+    return t`<article class="session-card ${selected ? "selected" : ""}">
       <div class="session-card-top"><div><span class="status-line"><i class="status-dot ${status.className}"></i>${status.label}</span>
       <h3 title="原名：${escapeHtml(session.name)}">${escapeHtml(sessionLabel(session))}</h3></div><label class="multi-check" title="加入多窗"><input type="checkbox" data-multi-select="${session.slug}" ${selected ? "checked" : ""}></label></div>
       <p class="session-path" title="${escapeHtml(session.path)}">${escapeHtml(compactPath(session.path))}</p>
@@ -1355,7 +1713,7 @@ function renderOverview() {
 
 function renderWindowStrip(sessions) {
   if (sessions.length !== 1) {
-    elements.windowStrip.innerHTML = `<span class="window-pill active">多窗模式 · ${sessions.length} sessions</span>`;
+    elements.windowStrip.innerHTML = t`<span class="window-pill active">多窗模式 · ${sessions.length} sessions</span>`;
     return;
   }
   const session = sessions[0];
@@ -1387,7 +1745,7 @@ function renderTerminal() {
   if (sessions.length === 1) {
     elements.viewTitle.textContent = sessionLabel(sessions[0]);
   } else {
-    elements.viewTitle.textContent = "多窗终端";
+    elements.viewTitle.textContent = t("多窗终端");
   }
   updateTerminalSubtitle();
   renderSessionList();
@@ -1403,7 +1761,7 @@ function showOverview() {
   setComposer(false);
   for (const view of terminalViews.values()) deactivateTerminalView(view);
   elements.viewTitle.textContent = "Sessions";
-  elements.viewSubtitle.textContent = "全部 tmux 工作区";
+  elements.viewSubtitle.textContent = t("全部 tmux 工作区");
   elements.newWindowButton.disabled = true;
   elements.openTerminalTab.disabled = true;
   elements.openCopyText.hidden = true;
@@ -1413,6 +1771,7 @@ function showOverview() {
 
 function openSession(slug) {
   if (!getSession(slug)) return;
+  try { (isStandaloneApp() ? localStorage : sessionStorage).setItem("codex-terminal-last-session", slug); } catch {}
   state.mode = "focus";
   state.activeSlug = slug;
   setInputTarget(slug);
@@ -1434,7 +1793,7 @@ function openMulti(slugs) {
 async function refreshSessions({ quiet = false } = {}) {
   if (!state.clientActive) return;
   try {
-    const data = await api("/api/sessions");
+    const data = await api("/api/sessions", { signal: AbortSignal.timeout(8000) });
     state.sessions = data.sessions;
     state.defaultCwd = data.defaultCwd;
     const valid = new Set(state.sessions.map((session) => session.slug));
@@ -1444,7 +1803,7 @@ async function refreshSessions({ quiet = false } = {}) {
     else if (state.mode === "overview") {
       renderSessionList(); renderOverview();
     } else renderTerminal();
-    elements.refreshTime.textContent = `更新于 ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    elements.refreshTime.textContent = t`更新于 ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   } catch (error) {
     if (!quiet) showToast(error.message, "error");
   }
@@ -1465,7 +1824,7 @@ function setComposer(open) {
 }
 
 function showToast(message, type = "success") {
-  elements.toast.textContent = message;
+  elements.toast.textContent = type === "error" ? errorText(message) : message;
   elements.toast.className = `toast show ${type}`;
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => { elements.toast.className = "toast"; }, 3200);
@@ -1473,34 +1832,85 @@ function showToast(message, type = "success") {
 
 let copyTextSnapshot = null;
 
+function historyTextSelected(view) {
+  if (view.historySelectionGuard?.blocked || view.selectionLayer?.querySelector("textarea:not([hidden])")) return true;
+  return historyDOMSelection(view);
+}
+
+function historyDOMSelection(view) {
+  const selection = window.getSelection();
+  return Boolean(view.selectionLayer && selection && !selection.isCollapsed
+    && view.selectionLayer.contains(selection.anchorNode));
+}
+
+function nativeHistoryText(view) {
+  const buffer = view.historyTerm.buffer.active;
+  return Array.from({ length: buffer.length }, (_, row) => buffer.getLine(row)?.translateToString(true) || "").join("\n");
+}
+
+function refreshNativeHistory(view) {
+  const layer = view.selectionLayer;
+  if (!layer?.classList.contains("native-history-reader") || historyTextSelected(view)) return;
+  const content = layer.querySelector("pre");
+  const previousHeight = content.scrollHeight;
+  const previousTop = content.scrollTop;
+  renderStyledTerminal(content, view.historyTerm);
+  content.scrollTop = previousTop + content.scrollHeight - previousHeight;
+}
+
 function closeHistorySelection(view) {
   if (!view.selectionLayer) return;
   const selection = window.getSelection();
   if (selection?.anchorNode && view.selectionLayer.contains(selection.anchorNode)) selection.removeAllRanges();
+  // Clean up event listeners
+  if (view.cleanupSelectionHandlers) {
+    view.cleanupSelectionHandlers();
+    view.cleanupSelectionHandlers = null;
+  }
   view.selectionLayer.remove();
   view.selectionLayer = null;
+  view.historySelectionGuard = null;
   view.panel.classList.remove("selecting-history");
 }
 
-function showHistorySelection(view, text) {
+function showHistorySelection(view, text, { reader = false } = {}) {
   if (view.selectionLayer) return;
   for (const cancel of view.cancelHistoryGestures) cancel();
   const layer = document.createElement("section");
   layer.className = "history-text-selection";
-  layer.setAttribute("aria-label", "历史屏幕文字选择");
-  layer.innerHTML = `<div class="history-selection-actions">
+  layer.classList.toggle("native-history-reader", reader);
+  layer.setAttribute("aria-label", t("历史屏幕文字选择"));
+  layer.innerHTML = t`<div class="history-selection-actions">
     <button type="button" data-copy-selection>复制选中</button>
-    <button type="button" data-copy-screen>复制整屏</button>
-    <button type="button" data-close-selection>返回历史</button>
+    <button type="button" data-copy-screen>${reader ? t("复制已加载") : t("复制整屏")}</button>
+    <button type="button" data-native-select>系统选字</button>
+    <button type="button" data-close-selection>${reader ? t("实时") : t("返回历史")}</button>
     </div><p role="status">长按下方文字，拖动选择手柄，使用系统“复制”或“复制选中”。</p>
-    <pre tabindex="0" aria-label="可长按选择的历史文字"></pre>`;
+    <pre aria-label="可长按选择的历史文字"></pre>
+    <textarea class="history-native-input" readonly wrap="off" spellcheck="false" aria-label="系统文字选择" hidden></textarea>`;
   const content = layer.querySelector("pre");
+  const nativeInput = layer.querySelector("textarea");
   content.textContent = text;
+  if (reader) renderStyledTerminal(content, view.historyTerm);
   content.style.fontFamily = view.historyTerm.options.fontFamily;
   content.style.fontSize = `${view.historyTerm.options.fontSize}px`;
+  if (reader) {
+    // fit() can update rows before the renderer updates screen height. Measure
+    // a rendered row, never divide a stale screen height by the new row count.
+    const measured = view.historyTerm.element?.querySelector(".xterm-rows > div")?.getBoundingClientRect().height;
+    const rowHeight = measured >= view.historyTerm.options.fontSize
+      ? measured : view.historyTerm.options.fontSize * view.historyTerm.options.lineHeight;
+    content.style.lineHeight = `${rowHeight}px`;
+    content.style.color = terminalTheme.foreground;
+    content.style.backgroundColor = terminalTheme.background;
+  }
   const feedback = layer.querySelector("p");
   let selectedText = "";
   const rememberSelection = () => {
+    if (!nativeInput.hidden) {
+      selectedText = nativeInput.value.slice(nativeInput.selectionStart, nativeInput.selectionEnd);
+      return selectedText;
+    }
     const selection = window.getSelection();
     if (selection?.anchorNode && content.contains(selection.anchorNode)
       && selection.focusNode && content.contains(selection.focusNode)) selectedText = selection.toString();
@@ -1512,39 +1922,142 @@ function showHistorySelection(view, text) {
     else selectedText = "";
   }, { capture: true });
   const copy = async value => {
-    if (!value) { feedback.textContent = "请先长按并选中要复制的文字。"; return; }
+    if (!value) { feedback.textContent = t("请先长按并选中要复制的文字。"); return; }
     try {
       await navigator.clipboard.writeText(value);
-      feedback.textContent = "已复制到剪贴板。";
+      feedback.textContent = t("已复制到剪贴板。");
     } catch {
-      feedback.textContent = "浏览器未允许直接复制，请长按文字并使用系统菜单中的“复制”。";
+      feedback.textContent = t("浏览器未允许直接复制，请长按文字并使用系统菜单中的“复制”。");
     }
   };
   layer.querySelector("[data-copy-selection]").addEventListener("click", () => copy(rememberSelection()));
-  layer.querySelector("[data-copy-screen]").addEventListener("click", () => copy(text));
-  layer.querySelector("[data-close-selection]").addEventListener("click", () => closeHistorySelection(view));
+  layer.querySelector("[data-copy-screen]").addEventListener("click", () => copy(content.textContent));
+  const nativeButton = layer.querySelector("[data-native-select]");
+  let originalTop = 0;
+  nativeButton.addEventListener("click", () => {
+    if (!nativeInput.hidden) {
+      nativeInput.hidden = true;
+      content.hidden = false;
+      content.scrollTop = originalTop;
+      nativeButton.textContent = t("系统选字");
+      return;
+    }
+    originalTop = content.scrollTop;
+    nativeInput.value = content.textContent;
+    nativeInput.style.font = getComputedStyle(content).font;
+    const row = Math.floor(originalTop / parseFloat(getComputedStyle(content).lineHeight));
+    const initial = initialTextSelection(nativeInput.value, row);
+    content.hidden = true;
+    nativeInput.hidden = false;
+    nativeInput.focus({ preventScroll: true });
+    nativeInput.setSelectionRange(initial.start, initial.end);
+    nativeInput.scrollTop = initial.row * parseFloat(getComputedStyle(content).lineHeight);
+    nativeButton.textContent = t("彩色浏览");
+    feedback.textContent = t("已切到系统选字，可长按调整范围，或点“复制选中”。内容不会刷新。");
+  });
+  layer.querySelector("[data-close-selection]").addEventListener("click", () => reader ? returnToLive(view, { focus: false }) : closeHistorySelection(view));
   view.selectionLayer = layer;
   view.panel.classList.add("selecting-history");
   view.historyLayer.append(layer);
+  if (reader) {
+    const guard = new HistorySelectionGuard();
+    view.historySelectionGuard = guard;
+    const lineHeight = parseFloat(getComputedStyle(content).lineHeight);
+    content.scrollTop = view.historyTerm.buffer.active.viewportY * lineHeight;
+    
+    // Ensure content is always selectable and touchable
+    content.style.userSelect = "text";
+    content.style.webkitUserSelect = "text";
+    content.style.touchAction = "auto";
+    
+    const scrollHandler = () => {
+      view.historyTerm.scrollToLine(Math.floor(content.scrollTop / lineHeight));
+      if (content.scrollTop <= content.clientHeight * 2 && !historyTextSelected(view)) loadEarlierHistory(view);
+    };
+    content.addEventListener("scroll", scrollHandler, { passive: true });
+    
+    const pointerDownHandler = event => {
+      if (event.pointerType !== "touch") return;
+      guard.start(event.clientX, event.clientY, performance.now(), historyDOMSelection(view));
+    };
+    content.addEventListener("pointerdown", pointerDownHandler, { passive: true });
+    
+    const pointerMoveHandler = event => {
+      if (event.pointerType === "touch") guard.move(event.clientX, event.clientY, performance.now(), historyDOMSelection(view));
+    };
+    content.addEventListener("pointermove", pointerMoveHandler, { passive: true });
+    
+    const pointerCancelHandler = () => guard.cancel(historyDOMSelection(view));
+    content.addEventListener("pointercancel", pointerCancelHandler, { passive: true });
+    
+    // Touch events continue to describe physical contact after Safari cancels
+    // pointer delivery for native scrolling / long-press selection.
+    const touchStartHandler = event => {
+      const touch = event.touches[0];
+      if (touch) guard.start(touch.clientX, touch.clientY, performance.now(), historyDOMSelection(view));
+    };
+    content.addEventListener("touchstart", touchStartHandler, { passive: true });
+    
+    const touchMoveHandler = event => {
+      const touch = event.touches[0];
+      if (touch) guard.move(touch.clientX, touch.clientY, performance.now(), historyDOMSelection(view));
+    };
+    content.addEventListener("touchmove", touchMoveHandler, { passive: true });
+    
+    const endTouch = event => {
+      if (event.type === "pointerup" && event.pointerType !== "touch") return;
+      if (event.touches?.length) return;
+      if (event.type === "touchcancel") guard.cancel(historyDOMSelection(view));
+      guard.end(performance.now(), historyDOMSelection(view));
+      requestAnimationFrame(() => {
+        if (view.selectionLayer === layer && content.scrollTop <= content.clientHeight * 2 && !historyTextSelected(view)) loadEarlierHistory(view);
+      });
+    };
+    for (const type of ["pointerup", "touchend", "touchcancel"]) content.addEventListener(type, endTouch, { passive: true });
+    
+    // Store cleanup function for explicit removal
+    view.cleanupSelectionHandlers = () => {
+      content.removeEventListener("scroll", scrollHandler);
+      content.removeEventListener("pointerdown", pointerDownHandler);
+      content.removeEventListener("pointermove", pointerMoveHandler);
+      content.removeEventListener("pointercancel", pointerCancelHandler);
+      content.removeEventListener("touchstart", touchStartHandler);
+      content.removeEventListener("touchmove", touchMoveHandler);
+      for (const type of ["pointerup", "touchend", "touchcancel"]) content.removeEventListener(type, endTouch);
+    };
+    
+    feedback.textContent = t("直接长按选字，可拖动手柄跨屏选择；选中期间暂停加载更早历史。");
+  }
 }
 
 function updateCopyText() {
   elements.copyTextContent.value = copyTextSnapshot?.[elements.copyTextScope.value] || "";
   elements.copyTextContent.scrollTop = 0;
   elements.copyTextAll.disabled = !elements.copyTextContent.value.trim();
-  elements.copyTextFeedback.textContent = "长按文字选择并复制，也可以一键复制全部。";
+  elements.copyTextFeedback.textContent = t("长按文字选择并复制，也可以一键复制全部。");
+}
+
+function buildCopyTextSnapshot(view) {
+  const terminal = view.historyActive ? view.historyTerm : view.term;
+  const screen = terminalPlainText(terminal);
+  // Live xterm is attached to tmux's client alternate screen (\x1b[?1049h),
+  // which only holds 1 viewport of lines. When historyTerm already has cached
+  // tmux scrollback loaded, use it for the full "loaded" copy scope.
+  const loadedSource = (!view.historyActive && view.historyReady && view.historyTerm.buffer.active.length > view.term.buffer.active.length)
+    ? view.historyTerm
+    : terminal;
+  return {
+    screen,
+    loaded: terminalPlainText(loadedSource, { viewportOnly: false }),
+  };
 }
 
 function openCopyText(slug = state.targetSlug || state.activeSlug, snapshot = null) {
   const view = terminalViews.get(slug);
-  if (!view?.visible) return showToast("请先打开一个 session", "error");
-  if (view.historyOpening) return showToast("缓存正在加载，请稍后复制", "error");
-  const terminal = view.historyActive ? view.historyTerm : view.term;
-  copyTextSnapshot = snapshot || {
-    screen: terminalPlainText(terminal),
-    loaded: terminalPlainText(terminal, { viewportOnly: false }),
-  };
-  elements.copyTextContext.textContent = `${sessionLabel(getSession(slug))} · ${view.historyActive ? "历史缓存" : "实时屏幕"}的文字副本，打开后不再刷新。`;
+  if (!view?.visible) return showToast(t("请先打开一个 session"), "error");
+  if (view.historyOpening) return showToast(t("缓存正在加载，请稍后复制"), "error");
+  copyTextSnapshot = snapshot || buildCopyTextSnapshot(view);
+  elements.copyTextContext.textContent = t`${sessionLabel(getSession(slug))} · ${view.historyActive ? t("历史缓存") : t("实时屏幕")}的文字副本，打开后不再刷新。`;
   elements.copyTextScope.value = "screen";
   elements.copyTextScope.disabled = false;
   updateCopyText();
@@ -1558,7 +2071,7 @@ async function receiveTmuxClipboard(view, text) {
   receiveTmuxClipboard.latest = request;
   const copied = await tmuxClipboard.write(view.slug, text);
   if (receiveTmuxClipboard.latest !== request) return;
-  showToast(copied ? "所选文字已复制到当前设备" : "浏览器未允许自动复制，剪贴板未更新", copied ? "success" : "error");
+  showToast(copied ? t("所选文字已复制到当前设备") : t("浏览器未允许自动复制，剪贴板未更新"), copied ? "success" : "error");
 }
 
 document.addEventListener("pointermove", (event) => {
@@ -1582,27 +2095,23 @@ elements.openCopyText.addEventListener("click", async () => {
   if (!window.matchMedia("(max-width: 900px)").matches) return openCopyText();
   const slug = state.targetSlug || state.activeSlug;
   const view = terminalViews.get(slug);
-  if (!view?.visible) return showToast("请先打开一个 session", "error");
-  if (view.historyOpening) return showToast("缓存正在加载，请稍后复制", "error");
+  if (!view?.visible) return showToast(t("请先打开一个 session"), "error");
+  if (view.historyOpening) return showToast(t("缓存正在加载，请稍后复制"), "error");
   if (view.historyActive) {
     showHistorySelection(view, terminalPlainText(view.historyTerm));
     return;
   }
-  const terminal = view.historyActive ? view.historyTerm : view.term;
-  const snapshot = {
-    screen: terminalPlainText(terminal),
-    loaded: terminalPlainText(terminal, { viewportOnly: false }),
-  };
-  if (!snapshot.screen.trim()) return showToast("当前屏幕没有可复制的文字");
+  const snapshot = buildCopyTextSnapshot(view);
+  if (!snapshot.screen.trim()) return showToast(t("当前屏幕没有可复制的文字"));
   // Start clipboard access directly in the tap gesture, with locally available
   // rendered text. No server round trip or mouse-only selection is required.
   try {
     if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
     await navigator.clipboard.writeText(snapshot.screen);
-    showToast("当前屏幕文字已复制");
+    showToast(t("当前屏幕文字已复制"));
   } catch {
     openCopyText(slug, snapshot);
-    elements.copyTextFeedback.textContent = "浏览器未允许直接复制，请长按下方文字选择并复制。";
+    elements.copyTextFeedback.textContent = t("浏览器未允许直接复制，请长按下方文字选择并复制。");
   }
 });
 elements.copyTextScope.addEventListener("change", updateCopyText);
@@ -1610,14 +2119,14 @@ elements.selectCopyText.addEventListener("click", () => {
   elements.copyTextContent.focus();
   elements.copyTextContent.select();
   elements.copyTextContent.setSelectionRange(0, elements.copyTextContent.value.length);
-  elements.copyTextFeedback.textContent = "已全选，可使用系统菜单复制。";
+  elements.copyTextFeedback.textContent = t("已全选，可使用系统菜单复制。");
 });
 elements.copyTextAll.addEventListener("click", async () => {
   const text = elements.copyTextContent.value;
   try {
     if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
     await navigator.clipboard.writeText(text);
-    elements.copyTextFeedback.textContent = "已复制到当前设备的剪贴板。";
+    elements.copyTextFeedback.textContent = t("已复制到当前设备的剪贴板。");
   } catch {
     elements.copyTextContent.focus();
     elements.copyTextContent.select();
@@ -1625,8 +2134,8 @@ elements.copyTextAll.addEventListener("click", async () => {
     let copied = false;
     try { copied = document.execCommand("copy"); } catch {}
     elements.copyTextFeedback.textContent = copied
-      ? "已复制到当前设备的剪贴板。"
-      : "浏览器未允许一键复制。文字已全选，请长按并选择系统菜单中的复制。";
+      ? t("已复制到当前设备的剪贴板。")
+      : t("浏览器未允许一键复制。文字已全选，请长按并选择系统菜单中的复制。");
   }
 });
 elements.copyTextDialog.addEventListener("close", () => {
@@ -1634,12 +2143,12 @@ elements.copyTextDialog.addEventListener("close", () => {
   elements.copyTextContent.value = "";
 });
 
-function openSidebar() { elements.sidebar.classList.add("open"); elements.scrim.classList.add("open"); }
+function openSidebar() { elements.sidebar.classList.add("open"); elements.scrim.classList.add("open"); refreshSessions({ quiet: true }); }
 function closeSidebar() { elements.sidebar.classList.remove("open"); elements.scrim.classList.remove("open"); }
 
 function updateMultiHint() {
   const count = state.multiSelection.size;
-  elements.multiSelectionHint.textContent = count ? `已选择 ${count} 个（最多 4 个）` : "未选择会话";
+  elements.multiSelectionHint.textContent = count ? t`已选择 ${count} 个（最多 4 个）` : t("未选择会话");
   elements.openSelectedMulti.disabled = count === 0;
 }
 
@@ -1671,7 +2180,7 @@ function requestDirectorySuggestions() {
   const generation = directoryCompletion.generation;
   const value = elements.newSessionCwd.value;
   elements.directorySuggestions.hidden = false;
-  elements.directoryStatus.textContent = "正在读取文件夹…";
+  elements.directoryStatus.textContent = t("正在读取文件夹…");
   elements.newSessionCwd.setAttribute("aria-expanded", "true");
   directoryCompletion.timer = setTimeout(async () => {
     const controller = new AbortController();
@@ -1681,14 +2190,14 @@ function requestDirectorySuggestions() {
       if (generation !== directoryCompletion.generation || !elements.newSessionDialog.open) return;
       directoryCompletion.items = result.directories;
       elements.directoryStatus.textContent = result.directories.length
-        ? `${result.parent} · ${result.truncated ? "前 80 项，请继续输入缩小范围" : `${result.directories.length} 个文件夹`}`
-        : "没有匹配的子文件夹；已有路径可直接用于创建。";
+        ? `${result.parent} · ${result.truncated ? t("前 80 项，请继续输入缩小范围") : t`${result.directories.length} 个文件夹`}`
+        : t("没有匹配的子文件夹；已有路径可直接用于创建。");
       elements.directoryOptions.innerHTML = result.directories.map((item, index) =>
         `<button type="button" class="directory-option" id="directory-option-${index}" role="option" aria-selected="false" data-directory-index="${index}" data-directory-path="${escapeHtml(item.path)}">${escapeHtml(item.name)}/</button>`
       ).join("");
     } catch (error) {
       if (generation !== directoryCompletion.generation || error.name === "AbortError") return;
-      elements.directoryStatus.textContent = `无法列出目录：${error.message}`;
+      elements.directoryStatus.textContent = t`无法列出目录：${error.message}`;
     }
   }, 150);
 }
@@ -1757,7 +2266,7 @@ function openSessionLabelDialog(slug) {
   const session = getSession(slug);
   if (!session) return;
   elements.sessionLabelForm.dataset.session = slug;
-  elements.sessionLabelOriginal.textContent = `原名：${session.name}`;
+  elements.sessionLabelOriginal.textContent = t`原名：${session.name}`;
   elements.sessionLabelInput.value = session.displayName || "";
   elements.sessionLabelDialog.showModal();
   elements.sessionLabelInput.focus();
@@ -1794,7 +2303,7 @@ elements.sessionLabelForm.addEventListener("submit", async (event) => {
     const visible = visibleSessions();
     if (visible.length === 1) elements.viewTitle.textContent = sessionLabel(visible[0]);
     elements.sessionLabelDialog.close();
-    showToast(data.session.displayName ? "显示名称已保存" : "已恢复显示原名");
+    showToast(data.session.displayName ? t("显示名称已保存") : t("已恢复显示原名"));
   } catch (error) {
     showToast(error.message, "error");
   } finally {
@@ -1804,23 +2313,23 @@ elements.sessionLabelForm.addEventListener("submit", async (event) => {
 
 function openNewWindowDialog(slug = state.targetSlug || state.activeSlug) {
   const session = getSession(slug);
-  if (!session) return showToast("请先打开一个 session", "error");
+  if (!session) return showToast(t("请先打开一个 session"), "error");
   setInputTarget(slug);
   const form = elements.newWindowForm;
   form.elements.name.value = `codex-${session.windows + 1}`;
   form.elements.cwd.value = activeWindow(session)?.path || session.path;
-  elements.newWindowContext.textContent = `将在 ${sessionLabel(session)} 中创建新的 tmux window。`;
+  elements.newWindowContext.textContent = t`将在 ${sessionLabel(session)} 中创建新的 tmux window。`;
   elements.newWindowDialog.showModal();
 }
 
 async function closeSession(slug) {
   const session = getSession(slug);
-  if (!session || !confirm(`确定结束 tmux session “${sessionLabel(session)}”（原名：${session.name}）吗？其中运行的程序会一并终止。`)) return;
+  if (!session || !confirm(t`确定结束 tmux session “${sessionLabel(session)}”（原名：${session.name}）吗？其中运行的程序会一并终止。`)) return;
   try {
     await api(`/api/sessions/${slug}`, { method: "DELETE" });
     const view = terminalViews.get(slug);
     if (view) disposeTerminalView(view);
-    showToast(`Session ${sessionLabel(session)} 已结束`);
+    showToast(t`Session ${sessionLabel(session)} 已结束`);
     showOverview();
     await refreshSessions({ quiet: true });
   } catch (error) { showToast(error.message, "error"); }
@@ -1830,6 +2339,8 @@ function disposeTerminalView(view) {
   returnToLive(view, { focus: false });
   if (view.serverActive) streamSend({ type: "active", session: view.slug, active: false });
   view.resizeObserver?.disconnect();
+  clearTimeout(view.historyPreloadTimer);
+  clearTimeout(view.keyboardLiftTimer);
   view.term.dispose();
   view.historyTerm.dispose();
   view.panel.remove();
@@ -1837,10 +2348,21 @@ function disposeTerminalView(view) {
 }
 
 function sendKey(key) {
+  if (key === "shift-tab") {
+    const view = terminalViews.get(state.targetSlug);
+    if (!view?.inputReady || !sessionLatency(view).endsWith(" ms") || inputDelivery.job) {
+      showToast(t("请等待终端可操作且当前发送完成后，再切换模式"), "error");
+      return;
+    }
+    if (streamSend({ type: "input", session: view.slug, data: "\x1b[Z" })) {
+      showToast(t("已发送 Shift+Tab，当前模式以终端提示为准"));
+    } else showToast(t("终端正在重连，未发送模式切换"), "error");
+    return;
+  }
   const codes = { escape: "\x1b", tab: "\t", enter: "\r", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", "shift-left": "\x1b[1;2D", "ctrl-c": "\x03", "ctrl-l": "\x0c" };
   const data = codes[key];
   if (!data || !state.targetSlug) return;
-  if (!streamSend({ type: "input", session: state.targetSlug, data })) showToast("终端正在重连", "error");
+  if (!streamSend({ type: "input", session: state.targetSlug, data })) showToast(t("终端正在重连"), "error");
 }
 
 function flushQueuedComposerInput(sessionSlug) {
@@ -1919,7 +2441,7 @@ elements.sessionGrid.addEventListener("change", (event) => {
   if (!input) return;
   if (input.checked && state.multiSelection.size >= 4) {
     input.checked = false;
-    return showToast("多窗最多同时打开 4 个 session", "error");
+    return showToast(t("多窗最多同时打开 4 个 session"), "error");
   }
   if (input.checked) state.multiSelection.add(input.dataset.multiSelect);
   else state.multiSelection.delete(input.dataset.multiSelect);
@@ -1946,7 +2468,7 @@ elements.newSessionForm.addEventListener("submit", async (event) => {
     elements.newSessionDialog.close();
     await refreshSessions({ quiet: true });
     openSession(data.session.slug);
-    showToast(`Session ${sessionLabel(data.session)} 已创建`);
+    showToast(t`Session ${sessionLabel(data.session)} 已创建`);
   } catch (error) { showToast(error.message, "error"); }
   finally { elements.createSessionSubmit.disabled = false; }
 });
@@ -1961,7 +2483,7 @@ elements.newWindowForm.addEventListener("submit", async (event) => {
     elements.newWindowDialog.close();
     await refreshSessions({ quiet: true });
     openSession(session.slug);
-    showToast(`已在 ${sessionLabel(session)} 中创建 Window`);
+    showToast(t`已在 ${sessionLabel(session)} 中创建 Window`);
   } catch (error) { showToast(error.message, "error"); }
   finally { elements.createWindowSubmit.disabled = false; }
 });
@@ -2023,6 +2545,13 @@ elements.mobileDpad.addEventListener("click", (event) => {
 });
 elements.composerToggle.addEventListener("click", () => setComposer(true));
 elements.composerClose.addEventListener("click", () => setComposer(false));
+elements.dismissKeyboard.addEventListener("pointerdown", event => event.preventDefault());
+elements.dismissKeyboard.addEventListener("click", () => {
+  document.activeElement?.blur();
+  elements.mobileDirectionToggle.closest(".mobile-control-deck").classList.remove("controls-open");
+  elements.mobileDirectionToggle.setAttribute("aria-expanded", "false");
+  syncVisualViewport();
+});
 elements.mobileDirectionToggle.addEventListener("click", () => {
   const deck = elements.mobileDirectionToggle.closest(".mobile-control-deck");
   const open = !deck.classList.contains("controls-open");
@@ -2045,7 +2574,8 @@ elements.scrim.addEventListener("click", closeSidebar);
 elements.reclaimClient.addEventListener("click", async () => {
   elements.reclaimClient.disabled = true;
   try {
-    if (await claimBrowser({ force: true })) { await refreshSessions(); const requested = new URLSearchParams(location.search).get("session"); if (requested) openSession(requested); }
+    if (await claimBrowser({ force: true, reason: "manual", connect: false })
+      && await recoverClaimedStream()) await restoreClaimedSession({ refresh: true });
   } catch (error) { showToast(error.message, "error"); }
   finally { elements.reclaimClient.disabled = false; }
 });
@@ -2056,7 +2586,7 @@ function markActivity() {
     state.idleSuspended = false;
     for (const view of terminalViews.values()) {
       if (view.visible) {
-        view.flowState = "正在恢复";
+        view.flowState = t("正在恢复");
         updateTerminalStatus(view);
       }
     }
@@ -2071,33 +2601,48 @@ function returnVisibleHistoryToLive() {
 }
 
 function isInsideSessionScreen(target) {
-  return target instanceof Element && Boolean(target.closest(
+  const element = target instanceof Element ? target : target?.parentElement;
+  return Boolean(element?.closest(
     ".xterm-host, .xterm-history-layer, .terminal-history-status, .terminal-search, .terminal-copy, #openCopyText, #copyTextDialog",
   ));
 }
 
-// History is a temporary reading mode. Moving focus to any page control means
-// the user has left the session screen, so the visible terminal resumes live.
+function isOutsideSessionControl(target) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return !isInsideSessionScreen(element) && Boolean(element?.closest(
+    "button, input, textarea, select, a[href], [contenteditable='true'], [role='button'], #scrim",
+  ));
+}
+
+// Only explicit page controls exit history. Browser selection UI can move
+// focus/retarget events to body; that is not permission to destroy its Range.
 document.addEventListener("pointerdown", (event) => {
-  if (!isInsideSessionScreen(event.target)) returnVisibleHistoryToLive();
+  if (isOutsideSessionControl(event.target)) returnVisibleHistoryToLive();
 }, { capture: true });
 document.addEventListener("focusin", (event) => {
-  if (!isInsideSessionScreen(event.target)) returnVisibleHistoryToLive();
-  if (mobileSessionInputFocused()) syncComposerLayout({ fit: false });
+  if (isOutsideSessionControl(event.target)) returnVisibleHistoryToLive();
+  if (mobileSessionInputFocused()) {
+    syncComposerLayout({ fit: false });
+    followKeyboardViewport();
+  }
 });
 elements.terminalInput.addEventListener("focus", () => {
   returnVisibleHistoryToLive();
   syncVisualViewport();
-  if (navigator.maxTouchPoints > 0) followKeyboardViewport();
 });
 
 for (const name of ["pointerdown", "keydown", "touchstart"]) {
   window.addEventListener(name, markActivity, { passive: true });
 }
 document.addEventListener("visibilitychange", () => {
-  state.lastActivityAt = Date.now();
-  if (document.hidden) flushInputDraft();
-  heartbeat();
+  if (document.hidden) { flushInputDraft(); heartbeat(); }
+  else resumeForeground();
+});
+window.addEventListener("pageshow", resumeForeground);
+window.addEventListener("online", () => {
+  // An online event is only a network hint, not proof that the socket died.
+  // Verify it first; preserve pending input and the current screen if it works.
+  resumeForeground();
 });
 // Browser chrome, app switching and tab visibility are not an explicit request
 // to leave history. Only page controls / the live button resume live output.
@@ -2114,16 +2659,17 @@ window.addEventListener("beforeunload", () => {
 });
 
 setInterval(heartbeat, 3000);
-setInterval(() => { if (state.streamReady) streamSend({ type: "ping", clientAt: Date.now() }); }, 5000);
+setInterval(checkStreamHealth, 1000);
+setInterval(renderConnectionProgressTime, 1000);
+setInterval(pingStream, 5000);
 setInterval(() => {
   for (const view of terminalViews.values()) if (view.visible) updateTerminalStatus(view);
   updateTerminalSubtitle();
   updateComposerConnection();
 }, 1000);
 setInterval(() => {
-  for (const view of terminalViews.values()) if (view.visible) probeSession(view);
-}, 5000);
-setInterval(() => refreshSessions({ quiet: true }), 15000);
+  if (!document.hidden && (state.mode === "overview" || elements.sidebar.classList.contains("open"))) refreshSessions({ quiet: true });
+}, 15000);
 setInterval(() => {
   const cutoff = Date.now() - terminalPanelKeepAliveMs;
   for (const view of terminalViews.values()) if (!view.visible && view.lastVisibleAt < cutoff) disposeTerminalView(view);
@@ -2135,20 +2681,31 @@ setInterval(() => {
     if (!view.visible) continue;
     if (view.serverActive) streamSend({ type: "active", session: view.slug, active: false });
     view.serverActive = false;
-    view.flowState = "闲置暂停 · 操作即恢复";
+    view.lastSentCols = 0;
+    view.lastSentRows = 0;
+    view.flowState = t("闲置暂停 · 操作即恢复");
     updateTerminalStatus(view);
   }
 }, 30000);
 
 async function start() {
+  bootTimings.appReadyMs = Math.round(performance.now());
+  const resource = performance.getEntriesByType("resource").filter(entry => {
+    try { return new URL(entry.name).pathname === "/terminal.js"; } catch { return false; }
+  }).at(-1);
+  if (resource) {
+    bootTimings.scriptDownloadMs = Math.round(resource.duration);
+    bootTimings.scriptBytes = resource.encodedBodySize;
+  }
+  window.__hubAppReady = true;
+  window.hubBoot?.finish();
+  document.getElementById("bootStatus")?.remove();
   syncVisualViewport();
   state.clientId = getOrCreateClientId();
   try {
     if (!(await claimBrowser())) return;
-    await refreshSessions();
-    const requested = new URLSearchParams(location.search).get("session");
-    if (requested && getSession(requested)) openSession(requested);
-    else showOverview();
+    await restoreClaimedSession({ refresh: true });
+    if (state.mode === "overview") showOverview();
   } catch (error) {
     showToast(error.message, "error");
     showTakeover({ occupied: false, phase: "stale" });

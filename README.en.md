@@ -6,6 +6,21 @@ A private, mobile-friendly browser interface for your persistent tmux sessions. 
 
 **Single user, trusted devices only. There is no application login. Anyone who can reach this service can obtain a shell with the host user's permissions. Keep the listener on loopback and restrict access using your tailnet policy. Never expose it with Tailscale Funnel or a public port.**
 
+## Screenshots
+
+These captures use the real web UI with **entirely synthetic demo data**. They do not connect to personal tmux sessions, Tailscale, or real projects. Session names, paths, output, and latency are illustrative. They show the Chinese version of the local development UI as of 2026-11-14, not necessarily a released version.
+
+**Desktop: session overview and terminal composer**
+
+![Desktop overview with four fictional projects](docs/screenshots/desktop-overview.png)
+![Desktop terminal with a bottom composer](docs/screenshots/desktop-terminal.png)
+
+**Mobile: direction and mode keys, independent history reader**
+
+<img src="docs/screenshots/mobile-controls.png" alt="Mobile terminal with direction, Esc and Shift+Tab mode controls" width="320"> <img src="docs/screenshots/mobile-history.png" alt="Mobile cached history reader" width="320">
+
+Mobile captures emulate a narrow browser viewport, without an OS keyboard or Safari chrome. See [capture and privacy notes](docs/screenshots/README.md) for reproduction details.
+
 ## Features
 
 - Session overview, search, single-session focus and up to four-session multi-view.
@@ -18,7 +33,7 @@ A private, mobile-friendly browser interface for your persistent tmux sessions. 
 - One multiplexed WebSocket, render acknowledgements, backpressure and snapshots. Per-session channel RTT is shown only for a confirmed usable terminal connection; disconnected or expired measurements are not displayed.
 - Explicit Reconnect takeover between browsers; session-view retention and idle cleanup without killing tmux.
 
-The interface is currently Chinese. Codex is optional: Shell mode and other terminal programs work too. This is an independent project, not an official OpenAI, Tailscale or tmux product.
+The interface defaults to English. Select **English / 中文** at the bottom of the sidebar (open the menu first on mobile). Your choice is stored in this browser. Switching saves your draft and reloads the page without stopping tmux tasks. Terminal output and custom session names are never translated. Codex is optional: Shell mode and other terminal programs work too. This is an independent project, not an official OpenAI, Tailscale or tmux product.
 
 ## Quick start
 
